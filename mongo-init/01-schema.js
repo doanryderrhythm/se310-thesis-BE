@@ -7,8 +7,9 @@ const schema = [
       password_hash: "string", role: "string", status: "string",
       created_at: "date", updated_at: "date"
     },
-    required: ["user_id"],
-    indexes: []
+    required: ["user_id", "full_name", "phone", "password_hash"],
+    indexes: [],
+    uniqueIndexes: ["phone"]
   },
   {
     name: "addresses",
@@ -235,6 +236,9 @@ for (const collection of schema) {
       properties
     }
   };
+  if (collection.name === "users") {
+    validator.$jsonSchema.properties.phone.pattern = "^[0-9]{10}$";
+  }
   const exists = db.getCollectionInfos({ name: collection.name }).length > 0;
 
   if (exists) {
@@ -259,5 +263,12 @@ for (const collection of schema) {
 
   for (const field of collection.indexes) {
     db.getCollection(collection.name).createIndex({ [field]: 1 });
+  }
+
+  for (const field of collection.uniqueIndexes || []) {
+    db.getCollection(collection.name).createIndex(
+      { [field]: 1 },
+      { unique: true, name: `${field}_unique` }
+    );
   }
 }
