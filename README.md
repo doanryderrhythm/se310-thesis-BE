@@ -2,23 +2,36 @@
 
 ## Local MongoDB
 
-The repository currently contains no backend application code, so this Compose
-setup provides a local MongoDB instance. Its initialization script creates the
-collections, validation rules, and indexes from the supplied database schema.
+This repository includes a local MongoDB instance and an ASP.NET Core API for
+phone/password authentication. MongoDB initialization creates the collections,
+validation rules, and indexes from the supplied database schema.
 
-1. Copy `.env.example` to `.env` and set local development passwords:
+1. Copy `.env.example` to `.env` and set local development passwords and a
+   random JWT signing key of at least 32 characters:
 
    ```powershell
    Copy-Item .env.example .env
    ```
 
-2. Start MongoDB with `docker compose up -d`.
+2. Start MongoDB and the API with `docker compose up --build -d`.
 3. Check readiness with `docker compose ps`.
-4. Stop it with `docker compose down`. Database files remain in the
+4. The API listens on `http://localhost:8080` by default. Register and log in
+   with the following JSON endpoints:
+
+   - `POST /api/auth/register` — `{"fullName":"Jane Doe","phone":"0123456789","password":"example-password"}`
+   - `POST /api/auth/login` — `{"phone":"0123456789","password":"example-password"}`
+
+   Both successful responses include a one-hour JWT access token and a
+   password-free user object. Phone numbers must contain exactly 10 digits.
+   Passwords must be at least 8 characters and no more than 72 UTF-8 bytes.
+   Registration rejects duplicate phone numbers. The API stores BCrypt
+   password hashes, not plaintext passwords.
+
+5. Stop it with `docker compose down`. Database files remain in the
    `mongodb_data` Docker volume.
 
-MongoDB and Mongo Express listen only on localhost. Open Mongo Express at
-`http://localhost:8081` and sign in with `MONGO_EXPRESS_USERNAME` and
+MongoDB, Mongo Express, and the API listen only on localhost. Open Mongo
+Express at `http://localhost:8081` and sign in with `MONGO_EXPRESS_USERNAME` and
 `MONGO_EXPRESS_PASSWORD` from `.env`. Change both example passwords before
 starting the services.
 
