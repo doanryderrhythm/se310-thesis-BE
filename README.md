@@ -21,6 +21,9 @@ product catalog and variants from `mongo-init/mock-data`.
 
    - `POST /api/auth/register` — `{"fullName":"Jane Doe","phone":"0123456789","password":"example-password"}`
    - `POST /api/auth/login` — `{"phone":"0123456789","password":"example-password"}`
+   - `GET /api/products/search?name=áo%20thun` — find products whose names
+     contain the search text (case-insensitive). The response includes product
+     details, images, and variants with size, color, price, and inventory.
 
    Both successful responses include a one-hour JWT access token and a
    password-free user object. Phone numbers must contain exactly 10 digits.
