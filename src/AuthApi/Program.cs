@@ -24,6 +24,13 @@ var tokenKey = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(signingKey));
 var mongoDatabase = new MongoClient(connectionString).GetDatabase(databaseName);
 var users = mongoDatabase.GetCollection<User>("users");
 var counters = mongoDatabase.GetCollection<Counter>("counters");
+var products = mongoDatabase.GetCollection<ProductDocument>("products");
+var categories = mongoDatabase.GetCollection<CategoryDocument>("categories");
+var productImages = mongoDatabase.GetCollection<ProductImageDocument>("product_images");
+var productVariants = mongoDatabase.GetCollection<ProductVariantDocument>("product_variants");
+var sizes = mongoDatabase.GetCollection<SizeDocument>("sizes");
+var colors = mongoDatabase.GetCollection<ColorDocument>("colors");
+var inventory = mongoDatabase.GetCollection<InventoryDocument>("inventory");
 
 builder.Services
     .AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
@@ -114,6 +121,92 @@ app.MapPost("/api/auth/login", async (LoginRequest request) =>
     }
 
     return Results.Ok(CreateAuthResponse(user, tokenKey));
+});
+
+app.MapGet("/api/products/search", async (string? name) =>
+{
+    if (string.IsNullOrWhiteSpace(name) || name.Trim().Length > 100)
+    {
+        return Results.ValidationProblem(new Dictionary<string, string[]>
+        {
+            ["name"] = ["Name is required and must be at most 100 characters."]
+        });
+    }
+
+    var namePattern = new BsonRegularExpression(Regex.Escape(name.Trim()), "i");
+    var matchingProducts = await products
+        .Find(Builders<ProductDocument>.Filter.Regex(product => product.Name, namePattern))
+        .SortBy(product => product.Name)
+        .Limit(50)
+        .ToListAsync();
+
+    if (matchingProducts.Count == 0)
+    {
+        return Results.Ok(Array.Empty<ProductResponse>());
+    }
+
+    var productIds = matchingProducts.Select(product => product.ProductId).ToArray();
+    var matchingImages = await productImages
+        .Find(Builders<ProductImageDocument>.Filter.In(image => image.ProductId, productIds))
+        .SortBy(image => image.ImageId)
+        .ToListAsync();
+    var matchingVariants = await productVariants
+        .Find(Builders<ProductVariantDocument>.Filter.In(variant => variant.ProductId, productIds))
+        .SortBy(variant => variant.VariantId)
+        .ToListAsync();
+    var categoryIds = matchingProducts.Select(product => product.CategoryId).Distinct().ToArray();
+    var matchingCategories = await categories
+        .Find(Builders<CategoryDocument>.Filter.In(category => category.CategoryId, categoryIds))
+        .ToListAsync();
+    var variantIds = matchingVariants.Select(variant => variant.VariantId).ToArray();
+    var matchingInventory = await inventory
+        .Find(Builders<InventoryDocument>.Filter.In(item => item.VariantId, variantIds))
+        .ToListAsync();
+    var sizeIds = matchingVariants.Select(variant => variant.SizeId).Distinct().ToArray();
+    var colorIds = matchingVariants.Select(variant => variant.ColorId).Distinct().ToArray();
+    var matchingSizes = await sizes
+        .Find(Builders<SizeDocument>.Filter.In(size => size.SizeId, sizeIds))
+        .ToListAsync();
+    var matchingColors = await colors
+        .Find(Builders<ColorDocument>.Filter.In(color => color.ColorId, colorIds))
+        .ToListAsync();
+
+    var categoryNames = matchingCategories.ToDictionary(category => category.CategoryId, category => category.Name);
+    var sizeNames = matchingSizes.ToDictionary(size => size.SizeId, size => size.Name);
+    var colorsById = matchingColors.ToDictionary(color => color.ColorId);
+    var inventoryByVariantId = matchingInventory.ToDictionary(item => item.VariantId);
+    var imagesByProductId = matchingImages
+        .GroupBy(image => image.ProductId)
+        .ToDictionary(group => group.Key, group => group.ToArray());
+    var variantsByProductId = matchingVariants
+        .GroupBy(variant => variant.ProductId)
+        .ToDictionary(group => group.Key, group => group.ToArray());
+
+    var response = matchingProducts.Select(product => new ProductResponse(
+        product.ProductId, product.CategoryId,
+        categoryNames.GetValueOrDefault(product.CategoryId),
+        product.SizeChartId,
+        product.Name, product.Description, product.Material, product.BasePrice,
+        product.Status,
+        imagesByProductId.GetValueOrDefault(product.ProductId, [])
+            .Select(image => new ProductImageResponse(image.ImageUrl, image.AltText))
+            .ToArray(),
+        variantsByProductId.GetValueOrDefault(product.ProductId, [])
+            .Select(variant =>
+            {
+                colorsById.TryGetValue(variant.ColorId, out var color);
+                inventoryByVariantId.TryGetValue(variant.VariantId, out var stock);
+                return new ProductVariantResponse(
+                    variant.VariantId, variant.Sku,
+                    sizeNames.GetValueOrDefault(variant.SizeId),
+                    color?.Name, color?.HexCode,
+                    variant.Price, variant.Status,
+                    stock?.QuantityOnHand, stock?.QuantityReserved);
+            })
+            .ToArray()))
+        .ToArray();
+
+    return Results.Ok(response);
 });
 
 app.Run();
@@ -226,6 +319,17 @@ internal sealed record RegisterRequest(string? FullName, string? Phone, string? 
 internal sealed record LoginRequest(string? Phone, string? Password);
 internal sealed record AuthResponse(string AccessToken, DateTime ExpiresAt, UserResponse User);
 internal sealed record UserResponse(long UserId, string FullName, string Phone, string Role);
+internal sealed record ProductResponse(
+    long ProductId, long CategoryId, string? CategoryName, long? SizeChartId,
+    string Name, string? Description, string? Material, double? BasePrice, string? Status,
+    ProductImageResponse[] Images,
+    ProductVariantResponse[] Variants);
+internal sealed record ProductImageResponse(string? ImageUrl, string? AltText);
+internal sealed record ProductVariantResponse(
+    long VariantId,
+    string? Sku, string? Size, string? Color, string? HexCode,
+    double? Price, string? Status,
+    int? QuantityOnHand, int? QuantityReserved);
 
 internal sealed class User
 {
@@ -264,4 +368,119 @@ internal sealed class Counter
 
     [BsonElement("sequence_value")]
     public long SequenceValue { get; set; }
+}
+
+[BsonIgnoreExtraElements]
+internal sealed class ProductDocument
+{
+    [BsonElement("product_id")]
+    public long ProductId { get; set; }
+
+    [BsonElement("category_id")]
+    public long CategoryId { get; set; }
+
+    [BsonElement("size_chart_id")]
+    public long? SizeChartId { get; set; }
+
+    [BsonElement("name")]
+    public string Name { get; set; } = string.Empty;
+
+    [BsonElement("description")]
+    public string? Description { get; set; }
+
+    [BsonElement("material")]
+    public string? Material { get; set; }
+
+    [BsonElement("base_price")]
+    public double? BasePrice { get; set; }
+
+    [BsonElement("status")]
+    public string? Status { get; set; }
+}
+
+[BsonIgnoreExtraElements]
+internal sealed class CategoryDocument
+{
+    [BsonElement("category_id")]
+    public long CategoryId { get; set; }
+
+    [BsonElement("name")]
+    public string Name { get; set; } = string.Empty;
+}
+
+[BsonIgnoreExtraElements]
+internal sealed class ProductImageDocument
+{
+    [BsonElement("image_id")]
+    public long ImageId { get; set; }
+
+    [BsonElement("product_id")]
+    public long ProductId { get; set; }
+
+    [BsonElement("image_url")]
+    public string? ImageUrl { get; set; }
+
+    [BsonElement("alt_text")]
+    public string? AltText { get; set; }
+}
+
+[BsonIgnoreExtraElements]
+internal sealed class ProductVariantDocument
+{
+    [BsonElement("variant_id")]
+    public long VariantId { get; set; }
+
+    [BsonElement("product_id")]
+    public long ProductId { get; set; }
+
+    [BsonElement("size_id")]
+    public long SizeId { get; set; }
+
+    [BsonElement("color_id")]
+    public long ColorId { get; set; }
+
+    [BsonElement("sku")]
+    public string? Sku { get; set; }
+
+    [BsonElement("price")]
+    public double? Price { get; set; }
+
+    [BsonElement("status")]
+    public string? Status { get; set; }
+}
+
+[BsonIgnoreExtraElements]
+internal sealed class SizeDocument
+{
+    [BsonElement("size_id")]
+    public long SizeId { get; set; }
+
+    [BsonElement("name")]
+    public string Name { get; set; } = string.Empty;
+}
+
+[BsonIgnoreExtraElements]
+internal sealed class ColorDocument
+{
+    [BsonElement("color_id")]
+    public long ColorId { get; set; }
+
+    [BsonElement("name")]
+    public string Name { get; set; } = string.Empty;
+
+    [BsonElement("hex_code")]
+    public string? HexCode { get; set; }
+}
+
+[BsonIgnoreExtraElements]
+internal sealed class InventoryDocument
+{
+    [BsonElement("variant_id")]
+    public long VariantId { get; set; }
+
+    [BsonElement("quantity_on_hand")]
+    public int? QuantityOnHand { get; set; }
+
+    [BsonElement("quantity_reserved")]
+    public int? QuantityReserved { get; set; }
 }

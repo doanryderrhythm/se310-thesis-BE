@@ -4,7 +4,8 @@
 
 This repository includes a local MongoDB instance and an ASP.NET Core API for
 phone/password authentication. MongoDB initialization creates the collections,
-validation rules, and indexes from the supplied database schema.
+validation rules, and indexes from the supplied database schema, then seeds the
+product catalog and variants from `mongo-init/mock-data`.
 
 1. Copy `.env.example` to `.env` and set local development passwords and a
    random JWT signing key of at least 32 characters:
@@ -20,6 +21,9 @@ validation rules, and indexes from the supplied database schema.
 
    - `POST /api/auth/register` — `{"fullName":"Jane Doe","phone":"0123456789","password":"example-password"}`
    - `POST /api/auth/login` — `{"phone":"0123456789","password":"example-password"}`
+   - `GET /api/products/search?name=áo%20thun` — find products whose names
+     contain the search text (case-insensitive). The response includes product
+     details, images, and variants with size, color, price, and inventory.
 
    Both successful responses include a one-hour JWT access token and a
    password-free user object. Phone numbers must contain exactly 10 digits.
@@ -51,9 +55,18 @@ volume, run the script manually:
 docker compose exec mongodb mongosh --username root --authenticationDatabase admin fashion-store-data /docker-entrypoint-initdb.d/01-schema.js
 ```
 
-The command prompts for the root password. Replace `fashion-store-data` if you
-changed `MONGO_DATABASE`. MongoDB does not enforce foreign keys; the schema
-preserves relationship fields and adds indexes for them. Numeric primary keys
-are uniquely indexed but are not auto-incremented; the application must assign
-their values. These services are for local development only; do not expose
-them publicly or reuse their credentials in production.
+For an existing volume, apply the schema first if needed, then seed or refresh
+the catalog with:
+
+```powershell
+docker compose exec mongodb mongosh --username root --authenticationDatabase admin fashion-store-data /docker-entrypoint-initdb.d/02-seed-products.js
+```
+
+Both commands prompt for the root password. Replace `fashion-store-data` if you
+changed `MONGO_DATABASE`. The seed uses numeric IDs derived from the fixture IDs
+and upserts documents, so it can be rerun without duplicating catalog records.
+MongoDB does not enforce foreign keys; the schema preserves relationship fields
+and adds indexes for them. Numeric primary keys are uniquely indexed but are
+not auto-incremented; the application must assign their values. These services
+are for local development only; do not expose them publicly or reuse their
+credentials in production.
