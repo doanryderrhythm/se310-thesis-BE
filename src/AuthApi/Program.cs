@@ -2,6 +2,8 @@ using System.IdentityModel.Tokens.Jwt;
 using System.Security.Claims;
 using System.Text;
 using System.Text.RegularExpressions;
+using AuthApi.Features.Admin;
+using AuthApi.Features.Customers;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.IdentityModel.Tokens;
 using MongoDB.Bson;
@@ -208,6 +210,9 @@ app.MapGet("/api/products/search", async (string? name) =>
 
     return Results.Ok(response);
 });
+
+app.MapCustomerEndpoints(users);
+app.MapAdminEndpoints(users, counters);
 
 app.Run();
 
