@@ -24,6 +24,9 @@ product catalog and variants from `mongo-init/mock-data`.
    - `GET /api/products/search?name=áo%20thun` — find products whose names
      contain the search text (case-insensitive). The response includes product
      details, images, and variants with size, color, price, and inventory.
+     Add `categoryId` to filter by category as well, for example
+     `/api/products/search?name=áo&categoryId=1`. The `name` parameter is
+     required; `categoryId` is optional.
 
    Both successful responses include a one-hour JWT access token and a
    password-free user object. Phone numbers must contain exactly 10 digits.
