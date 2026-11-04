@@ -123,7 +123,7 @@ app.MapPost("/api/auth/login", async (LoginRequest request) =>
     return Results.Ok(CreateAuthResponse(user, tokenKey));
 });
 
-app.MapGet("/api/products/search", async (string? name) =>
+app.MapGet("/api/products/search", async (string? name, long? categoryId) =>
 {
     if (string.IsNullOrWhiteSpace(name) || name.Trim().Length > 100)
     {
@@ -134,8 +134,12 @@ app.MapGet("/api/products/search", async (string? name) =>
     }
 
     var namePattern = new BsonRegularExpression(Regex.Escape(name.Trim()), "i");
+    var productFilter = Builders<ProductDocument>.Filter.Regex(product => product.Name, namePattern);
+    if (categoryId.HasValue)
+        productFilter &= Builders<ProductDocument>.Filter.Eq(product => product.CategoryId, categoryId.Value);
+
     var matchingProducts = await products
-        .Find(Builders<ProductDocument>.Filter.Regex(product => product.Name, namePattern))
+        .Find(productFilter)
         .SortBy(product => product.Name)
         .Limit(50)
         .ToListAsync();
