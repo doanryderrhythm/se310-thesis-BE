@@ -59,6 +59,7 @@ await users.Indexes.CreateOneAsync(new CreateIndexModel<User>(
     Builders<User>.IndexKeys.Ascending(user => user.Phone),
     new CreateIndexOptions { Unique = true, Name = "phone_unique" }));
 await InitializeUserCounterAsync(users, counters);
+await InitializeAddressCounterAsync(deliveryAddresses, counters);
 
 app.UseAuthentication();
 app.UseAuthorization();
@@ -216,7 +217,7 @@ app.MapGet("/api/products/search", async (string? name, long? categoryId) =>
     return Results.Ok(response);
 });
 
-app.MapCustomerEndpoints(users, deliveryAddresses);
+app.MapCustomerEndpoints(users, deliveryAddresses, counters);
 app.MapAdminEndpoints(users, counters);
 
 app.Run();
@@ -299,6 +300,29 @@ static async Task InitializeUserCounterAsync(
     catch (MongoWriteException exception) when (exception.WriteError?.Code == 11000)
     {
         await counters.UpdateOneAsync(counter => counter.Id == "users", update);
+    }
+}
+
+static async Task InitializeAddressCounterAsync(
+    IMongoCollection<DeliveryAddressDocument> addresses,
+    IMongoCollection<Counter> counters)
+{
+    var largestAddressId = await addresses.Find(Builders<DeliveryAddressDocument>.Filter.Empty)
+        .SortByDescending(address => address.AddressId)
+        .Project(address => address.AddressId)
+        .FirstOrDefaultAsync();
+    var update = Builders<Counter>.Update.Max(counter => counter.SequenceValue, largestAddressId);
+
+    try
+    {
+        await counters.UpdateOneAsync(
+            counter => counter.Id == "addresses",
+            update,
+            new UpdateOptions { IsUpsert = true });
+    }
+    catch (MongoWriteException exception) when (exception.WriteError?.Code == 11000)
+    {
+        await counters.UpdateOneAsync(counter => counter.Id == "addresses", update);
     }
 }
 

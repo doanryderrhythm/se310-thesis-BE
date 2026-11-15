@@ -30,6 +30,11 @@ product catalog and variants from `mongo-init/mock-data`.
    - `GET /api/customers/me/addresses` — fetch delivery addresses belonging
      to the authenticated customer. Send the login access token as a bearer
      token in the `Authorization` header.
+   - `POST /api/customers/me/addresses` — add a delivery address for the
+     authenticated customer with `recipientName`, `recipientPhone`,
+     `addressLine`, `ward`, `district`, and `province`. Optionally set
+     `isDefault` to `true`. Recipient phone numbers must contain exactly
+     10 digits.
 
    Successful registration and login responses include a one-hour JWT access
    token and a password-free user object. Phone numbers must contain exactly
