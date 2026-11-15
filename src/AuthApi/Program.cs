@@ -397,6 +397,9 @@ internal sealed class User
 
 internal sealed class DeliveryAddressDocument
 {
+    [BsonId]
+    public ObjectId Id { get; set; }
+
     [BsonElement("address_id")]
     public long AddressId { get; set; }
 
