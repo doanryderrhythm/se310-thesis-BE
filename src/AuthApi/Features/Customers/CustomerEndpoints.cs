@@ -5,15 +5,36 @@ namespace AuthApi.Features.Customers;
 
 internal static class CustomerEndpoints
 {
-    public static void MapCustomerEndpoints(this IEndpointRouteBuilder app, IMongoCollection<User> users)
+    public static void MapCustomerEndpoints(
+        this IEndpointRouteBuilder app,
+        IMongoCollection<User> users,
+        IMongoCollection<DeliveryAddressDocument> deliveryAddresses)
     {
         var currentUsers = new CurrentUserService(users);
         var customers = new CustomerService(users);
+        var addresses = new DeliveryAddressService(deliveryAddresses);
         var group = app.MapGroup("/api/customers").RequireAuthorization();
         Func<HttpContext, Task<IResult>> getMe = context => GetMeAsync(context, currentUsers);
+        Func<HttpContext, Task<IResult>> getMyDeliveryAddresses =
+            context => GetMyDeliveryAddressesAsync(context, currentUsers, addresses);
         group.MapGet("/me", getMe);
+        group.MapGet("/me/addresses", getMyDeliveryAddresses);
         group.MapPatch("/me", (HttpContext context, UpdateProfileRequest request) =>
             UpdateMeAsync(context, request, currentUsers, customers));
+    }
+
+    private static async Task<IResult> GetMyDeliveryAddressesAsync(
+        HttpContext context,
+        CurrentUserService currentUsers,
+        DeliveryAddressService addresses)
+    {
+        var (user, error) = await currentUsers.ResolveAsync(context, UserRoles.Customer);
+        if (error is not null)
+        {
+            return error;
+        }
+
+        return Results.Ok(await addresses.GetForUserAsync(user!.UserId));
     }
 
     private static async Task<IResult> GetMeAsync(
