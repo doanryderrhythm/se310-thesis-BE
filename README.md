@@ -27,12 +27,20 @@ product catalog and variants from `mongo-init/mock-data`.
      Add `categoryId` to filter by category as well, for example
      `/api/products/search?name=áo&categoryId=1`. The `name` parameter is
      required; `categoryId` is optional.
+   - `GET /api/customers/me/addresses` — fetch delivery addresses belonging
+     to the authenticated customer. Send the login access token as a bearer
+     token in the `Authorization` header.
+   - `POST /api/customers/me/addresses` — add a delivery address for the
+     authenticated customer with `recipientName`, `recipientPhone`,
+     `addressLine`, `ward`, `district`, and `province`. Optionally set
+     `isDefault` to `true`. Recipient phone numbers must contain exactly
+     10 digits.
 
-   Both successful responses include a one-hour JWT access token and a
-   password-free user object. Phone numbers must contain exactly 10 digits.
-   Passwords must be at least 8 characters and no more than 72 UTF-8 bytes.
-   Registration rejects duplicate phone numbers. The API stores BCrypt
-   password hashes, not plaintext passwords.
+   Successful registration and login responses include a one-hour JWT access
+   token and a password-free user object. Phone numbers must contain exactly
+   10 digits. Passwords must be at least 8 characters and no more than 72
+   UTF-8 bytes. Registration rejects duplicate phone numbers. The API stores
+   BCrypt password hashes, not plaintext passwords.
 
 5. Stop it with `docker compose down`. Database files remain in the
    `mongodb_data` Docker volume.

@@ -25,6 +25,7 @@ if (Encoding.UTF8.GetByteCount(signingKey) < 32)
 var tokenKey = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(signingKey));
 var mongoDatabase = new MongoClient(connectionString).GetDatabase(databaseName);
 var users = mongoDatabase.GetCollection<User>("users");
+var deliveryAddresses = mongoDatabase.GetCollection<DeliveryAddressDocument>("addresses");
 var counters = mongoDatabase.GetCollection<Counter>("counters");
 var products = mongoDatabase.GetCollection<ProductDocument>("products");
 var categories = mongoDatabase.GetCollection<CategoryDocument>("categories");
@@ -58,6 +59,7 @@ await users.Indexes.CreateOneAsync(new CreateIndexModel<User>(
     Builders<User>.IndexKeys.Ascending(user => user.Phone),
     new CreateIndexOptions { Unique = true, Name = "phone_unique" }));
 await InitializeUserCounterAsync(users, counters);
+await InitializeAddressCounterAsync(deliveryAddresses, counters);
 
 app.UseAuthentication();
 app.UseAuthorization();
@@ -215,7 +217,7 @@ app.MapGet("/api/products/search", async (string? name, long? categoryId) =>
     return Results.Ok(response);
 });
 
-app.MapCustomerEndpoints(users);
+app.MapCustomerEndpoints(users, deliveryAddresses, counters);
 app.MapAdminEndpoints(users, counters);
 
 app.Run();
@@ -301,6 +303,29 @@ static async Task InitializeUserCounterAsync(
     }
 }
 
+static async Task InitializeAddressCounterAsync(
+    IMongoCollection<DeliveryAddressDocument> addresses,
+    IMongoCollection<Counter> counters)
+{
+    var largestAddressId = await addresses.Find(Builders<DeliveryAddressDocument>.Filter.Empty)
+        .SortByDescending(address => address.AddressId)
+        .Project(address => address.AddressId)
+        .FirstOrDefaultAsync();
+    var update = Builders<Counter>.Update.Max(counter => counter.SequenceValue, largestAddressId);
+
+    try
+    {
+        await counters.UpdateOneAsync(
+            counter => counter.Id == "addresses",
+            update,
+            new UpdateOptions { IsUpsert = true });
+    }
+    catch (MongoWriteException exception) when (exception.WriteError?.Code == 11000)
+    {
+        await counters.UpdateOneAsync(counter => counter.Id == "addresses", update);
+    }
+}
+
 static AuthResponse CreateAuthResponse(User user, SymmetricSecurityKey tokenKey)
 {
     var expiresAt = DateTime.UtcNow.AddHours(1);
@@ -368,6 +393,42 @@ internal sealed class User
 
     [BsonElement("updated_at")]
     public DateTime UpdatedAt { get; set; }
+}
+
+internal sealed class DeliveryAddressDocument
+{
+    [BsonId]
+    public ObjectId Id { get; set; }
+
+    [BsonElement("address_id")]
+    public long AddressId { get; set; }
+
+    [BsonElement("user_id")]
+    public long UserId { get; set; }
+
+    [BsonElement("recipient_name")]
+    public string? RecipientName { get; set; }
+
+    [BsonElement("recipient_phone")]
+    public string? RecipientPhone { get; set; }
+
+    [BsonElement("address_line")]
+    public string? AddressLine { get; set; }
+
+    [BsonElement("ward")]
+    public string? Ward { get; set; }
+
+    [BsonElement("district")]
+    public string? District { get; set; }
+
+    [BsonElement("province")]
+    public string? Province { get; set; }
+
+    [BsonElement("is_default")]
+    public bool? IsDefault { get; set; }
+
+    [BsonElement("created_at")]
+    public DateTime? CreatedAt { get; set; }
 }
 
 internal sealed class Counter
