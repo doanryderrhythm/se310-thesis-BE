@@ -45,6 +45,22 @@ product catalog and variants from `mongo-init/mock-data`.
 5. Stop it with `docker compose down`. Database files remain in the
    `mongodb_data` Docker volume.
 
+## Product detail, cart, and review APIs
+
+| Endpoint | Auth | Request | Success / errors |
+| --- | --- | --- | --- |
+| `GET /api/products/{productId}` | Public | None | `200` with product, images, active variants (`quantityOnHand`, `quantityReserved`, `availableQuantity`, `inStock`), `totalAvailableQuantity`, and `sizeChart`. `404` if missing or inactive. |
+| `GET /api/cart` | Customer | None | `200` with `items`, `totalQuantity`, `subtotal`. Each item has current price, `availableQuantity`, and `isPurchasable`; `subtotal` counts purchasable lines only. |
+| `POST /api/cart/items` | Customer | `{"variantId":1,"quantity":2}` (quantity 1–99) | `200` with the updated cart; quantities add up on one line per variant. `400` validation, `404` unknown/inactive variant, `409` if the total would exceed available stock (`availableQuantity` in body). Stock is not reserved. |
+| `DELETE /api/cart/items/{variantId}` | Customer | None | `200` with the updated cart, `404` if the line is not in the cart. |
+| `GET /api/products/{productId}/reviews?page=1&pageSize=10` | Public | pageSize 1–50 | `200` with published reviews, `totalCount`, `averageRating`. |
+| `POST /api/products/{productId}/reviews` | Customer | `{"rating":5,"comment":"10-500 characters"}` | `201` (published immediately). `409` if the customer already reviewed the product. |
+| `GET /api/customers/me/reviews` | Customer | None | `200` with the customer's own reviews. |
+| `DELETE /api/customers/me/reviews/{reviewId}` | Customer | None | `204`; `404` if not the customer's review. |
+| `DELETE /api/admin/reviews/{reviewId}` | Admin | None | `204`; `404` if missing. |
+
+Reviews are not yet tied to delivered orders (`order_item_id` stays null).
+
 MongoDB, Mongo Express, and the API listen only on localhost. Open Mongo
 Express at `http://localhost:8081` and sign in with `MONGO_EXPRESS_USERNAME` and
 `MONGO_EXPRESS_PASSWORD` from `.env`. Change both example passwords before

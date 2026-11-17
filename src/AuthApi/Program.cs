@@ -3,7 +3,10 @@ using System.Security.Claims;
 using System.Text;
 using System.Text.RegularExpressions;
 using AuthApi.Features.Admin;
+using AuthApi.Features.Carts;
 using AuthApi.Features.Customers;
+using AuthApi.Features.Products;
+using AuthApi.Features.Reviews;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.IdentityModel.Tokens;
 using MongoDB.Bson;
@@ -217,6 +220,12 @@ app.MapGet("/api/products/search", async (string? name, long? categoryId) =>
     return Results.Ok(response);
 });
 
+var counterService = new AuthApi.Data.CounterService(counters);
+await AuthApi.Features.Carts.CartService.SetupAsync(mongoDatabase, counterService);
+await AuthApi.Features.Reviews.ReviewEndpoints.SetupAsync(mongoDatabase, counterService);
+app.MapProductEndpoints(mongoDatabase);
+app.MapCartEndpoints(mongoDatabase, users, counterService);
+app.MapReviewEndpoints(mongoDatabase, users, counterService);
 app.MapCustomerEndpoints(users, deliveryAddresses, counters);
 app.MapAdminEndpoints(users, counters);
 
