@@ -40,6 +40,9 @@ product catalog and variants from `mongo-init/mock-data`.
      adding an address; the endpoint returns `404` if the address does not
      belong to that customer. Setting `isDefault` to `true` clears that flag
      from the customer's other addresses.
+   - `DELETE /api/customers/me/addresses/{addressId}` — delete an address
+     belonging to the authenticated customer. Returns `204` when deleted or
+     `404` if the address does not belong to that customer.
 
    Successful registration and login responses include a one-hour JWT access
    token and a password-free user object. Phone numbers must contain exactly

@@ -79,6 +79,15 @@ internal sealed class DeliveryAddressService(
         return ToResponse(address);
     }
 
+    public async Task<bool> DeleteForUserAsync(long userId, long addressId)
+    {
+        var filter = Builders<DeliveryAddressDocument>.Filter.And(
+            Builders<DeliveryAddressDocument>.Filter.Eq(address => address.UserId, userId),
+            Builders<DeliveryAddressDocument>.Filter.Eq(address => address.AddressId, addressId));
+        var result = await deliveryAddresses.DeleteOneAsync(filter);
+        return result.DeletedCount > 0;
+    }
+
     private async Task<long> NextAddressIdAsync()
     {
         var counter = await counters.FindOneAndUpdateAsync(
