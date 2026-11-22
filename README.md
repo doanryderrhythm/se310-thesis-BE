@@ -38,7 +38,8 @@ product catalog and variants from `mongo-init/mock-data`.
    - `PUT /api/customers/me/addresses/{addressId}` — replace an address
      belonging to the authenticated customer. Send the same fields as when
      adding an address; the endpoint returns `404` if the address does not
-     belong to that customer.
+     belong to that customer. Setting `isDefault` to `true` clears that flag
+     from the customer's other addresses.
 
    Successful registration and login responses include a one-hour JWT access
    token and a password-free user object. Phone numbers must contain exactly

@@ -60,7 +60,23 @@ internal sealed class DeliveryAddressService(
                 ReturnDocument = ReturnDocument.After
             });
 
-        return address is null ? null : ToResponse(address);
+        if (address is null)
+        {
+            return null;
+        }
+
+        if (request.IsDefault == true)
+        {
+            var otherDefaultsFilter = Builders<DeliveryAddressDocument>.Filter.And(
+                Builders<DeliveryAddressDocument>.Filter.Eq(item => item.UserId, userId),
+                Builders<DeliveryAddressDocument>.Filter.Ne(item => item.AddressId, addressId),
+                Builders<DeliveryAddressDocument>.Filter.Eq(item => item.IsDefault, true));
+            await deliveryAddresses.UpdateManyAsync(
+                otherDefaultsFilter,
+                Builders<DeliveryAddressDocument>.Update.Set(item => item.IsDefault, false));
+        }
+
+        return ToResponse(address);
     }
 
     private async Task<long> NextAddressIdAsync()
