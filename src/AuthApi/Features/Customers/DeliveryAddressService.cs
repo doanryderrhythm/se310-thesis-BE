@@ -38,6 +38,56 @@ internal sealed class DeliveryAddressService(
         return addresses.Select(ToResponse).ToArray();
     }
 
+    public async Task<DeliveryAddressResponse?> UpdateForUserAsync(
+        long userId, long addressId, CreateDeliveryAddressRequest request)
+    {
+        var filter = Builders<DeliveryAddressDocument>.Filter.And(
+            Builders<DeliveryAddressDocument>.Filter.Eq(address => address.UserId, userId),
+            Builders<DeliveryAddressDocument>.Filter.Eq(address => address.AddressId, addressId));
+        var update = Builders<DeliveryAddressDocument>.Update
+            .Set(address => address.RecipientName, request.RecipientName!.Trim())
+            .Set(address => address.RecipientPhone, request.RecipientPhone)
+            .Set(address => address.AddressLine, request.AddressLine!.Trim())
+            .Set(address => address.Ward, request.Ward!.Trim())
+            .Set(address => address.District, request.District!.Trim())
+            .Set(address => address.Province, request.Province!.Trim())
+            .Set(address => address.IsDefault, request.IsDefault ?? false);
+        var address = await deliveryAddresses.FindOneAndUpdateAsync(
+            filter,
+            update,
+            new FindOneAndUpdateOptions<DeliveryAddressDocument>
+            {
+                ReturnDocument = ReturnDocument.After
+            });
+
+        if (address is null)
+        {
+            return null;
+        }
+
+        if (request.IsDefault == true)
+        {
+            var otherDefaultsFilter = Builders<DeliveryAddressDocument>.Filter.And(
+                Builders<DeliveryAddressDocument>.Filter.Eq(item => item.UserId, userId),
+                Builders<DeliveryAddressDocument>.Filter.Ne(item => item.AddressId, addressId),
+                Builders<DeliveryAddressDocument>.Filter.Eq(item => item.IsDefault, true));
+            await deliveryAddresses.UpdateManyAsync(
+                otherDefaultsFilter,
+                Builders<DeliveryAddressDocument>.Update.Set(item => item.IsDefault, false));
+        }
+
+        return ToResponse(address);
+    }
+
+    public async Task<bool> DeleteForUserAsync(long userId, long addressId)
+    {
+        var filter = Builders<DeliveryAddressDocument>.Filter.And(
+            Builders<DeliveryAddressDocument>.Filter.Eq(address => address.UserId, userId),
+            Builders<DeliveryAddressDocument>.Filter.Eq(address => address.AddressId, addressId));
+        var result = await deliveryAddresses.DeleteOneAsync(filter);
+        return result.DeletedCount > 0;
+    }
+
     private async Task<long> NextAddressIdAsync()
     {
         var counter = await counters.FindOneAndUpdateAsync(

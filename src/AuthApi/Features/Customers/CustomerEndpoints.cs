@@ -21,11 +21,74 @@ internal static class CustomerEndpoints
             context => GetMyDeliveryAddressesAsync(context, currentUsers, addresses);
         Func<HttpContext, CreateDeliveryAddressRequest, Task<IResult>> addMyDeliveryAddress =
             (context, request) => AddMyDeliveryAddressAsync(context, request, currentUsers, addresses);
+        Func<HttpContext, long, CreateDeliveryAddressRequest, Task<IResult>> updateMyDeliveryAddress =
+            (context, addressId, request) =>
+                UpdateMyDeliveryAddressAsync(context, addressId, request, currentUsers, addresses);
+        Func<HttpContext, long, Task<IResult>> deleteMyDeliveryAddress =
+            (context, addressId) =>
+                DeleteMyDeliveryAddressAsync(context, addressId, currentUsers, addresses);
         group.MapGet("/me", getMe);
         group.MapGet("/me/addresses", getMyDeliveryAddresses);
         group.MapPost("/me/addresses", addMyDeliveryAddress);
+        group.MapPut("/me/addresses/{addressId:long}", updateMyDeliveryAddress);
+        group.MapDelete("/me/addresses/{addressId:long}", deleteMyDeliveryAddress);
         group.MapPatch("/me", (HttpContext context, UpdateProfileRequest request) =>
             UpdateMeAsync(context, request, currentUsers, customers));
+    }
+
+    private static async Task<IResult> DeleteMyDeliveryAddressAsync(
+        HttpContext context,
+        long addressId,
+        CurrentUserService currentUsers,
+        DeliveryAddressService addresses)
+    {
+        var (user, error) = await currentUsers.ResolveAsync(context, UserRoles.Customer);
+        if (error is not null)
+        {
+            return error;
+        }
+
+        if (addressId <= 0)
+        {
+            return Results.ValidationProblem(new Dictionary<string, string[]>
+            {
+                ["addressId"] = ["Address ID must be a positive number."]
+            });
+        }
+
+        var deleted = await addresses.DeleteForUserAsync(user!.UserId, addressId);
+        return deleted ? Results.NoContent() : Results.NotFound();
+    }
+
+    private static async Task<IResult> UpdateMyDeliveryAddressAsync(
+        HttpContext context,
+        long addressId,
+        CreateDeliveryAddressRequest request,
+        CurrentUserService currentUsers,
+        DeliveryAddressService addresses)
+    {
+        var (user, error) = await currentUsers.ResolveAsync(context, UserRoles.Customer);
+        if (error is not null)
+        {
+            return error;
+        }
+
+        if (addressId <= 0)
+        {
+            return Results.ValidationProblem(new Dictionary<string, string[]>
+            {
+                ["addressId"] = ["Address ID must be a positive number."]
+            });
+        }
+
+        var errors = ValidateDeliveryAddress(request);
+        if (errors.Count > 0)
+        {
+            return Results.ValidationProblem(errors);
+        }
+
+        var address = await addresses.UpdateForUserAsync(user!.UserId, addressId, request);
+        return address is null ? Results.NotFound() : Results.Ok(address);
     }
 
     private static async Task<IResult> AddMyDeliveryAddressAsync(
