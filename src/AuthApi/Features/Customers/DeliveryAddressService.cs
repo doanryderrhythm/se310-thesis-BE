@@ -38,6 +38,31 @@ internal sealed class DeliveryAddressService(
         return addresses.Select(ToResponse).ToArray();
     }
 
+    public async Task<DeliveryAddressResponse?> UpdateForUserAsync(
+        long userId, long addressId, CreateDeliveryAddressRequest request)
+    {
+        var filter = Builders<DeliveryAddressDocument>.Filter.And(
+            Builders<DeliveryAddressDocument>.Filter.Eq(address => address.UserId, userId),
+            Builders<DeliveryAddressDocument>.Filter.Eq(address => address.AddressId, addressId));
+        var update = Builders<DeliveryAddressDocument>.Update
+            .Set(address => address.RecipientName, request.RecipientName!.Trim())
+            .Set(address => address.RecipientPhone, request.RecipientPhone)
+            .Set(address => address.AddressLine, request.AddressLine!.Trim())
+            .Set(address => address.Ward, request.Ward!.Trim())
+            .Set(address => address.District, request.District!.Trim())
+            .Set(address => address.Province, request.Province!.Trim())
+            .Set(address => address.IsDefault, request.IsDefault ?? false);
+        var address = await deliveryAddresses.FindOneAndUpdateAsync(
+            filter,
+            update,
+            new FindOneAndUpdateOptions<DeliveryAddressDocument>
+            {
+                ReturnDocument = ReturnDocument.After
+            });
+
+        return address is null ? null : ToResponse(address);
+    }
+
     private async Task<long> NextAddressIdAsync()
     {
         var counter = await counters.FindOneAndUpdateAsync(
