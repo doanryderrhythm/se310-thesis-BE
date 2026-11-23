@@ -32,7 +32,7 @@ internal sealed class CartService(IMongoDatabase db, CounterService counters, Pr
     public async Task<CartResponse> GetAsync(long userId)
     {
         var cart = await FindActiveCartAsync(userId);
-        return cart is null ? new CartResponse(null, [], 0, 0) : await BuildResponseAsync(cart);
+        return cart is null ? new CartResponse(null, [], 0, 0, 0, 0) : await BuildResponseAsync(cart);
     }
 
     public async Task<(CartResponse? Cart, IResult? Error)> AddItemAsync(long userId, long variantId, int quantity)
@@ -67,7 +67,8 @@ internal sealed class CartService(IMongoDatabase db, CounterService counters, Pr
             {
                 var result = await items.UpdateOneAsync(
                     i => i.CartItemId == existing.CartItemId && i.Quantity == existing.Quantity,
-                    Builders<CartItemDocument>.Update.Set(i => i.Quantity, newQuantity));
+                    Builders<CartItemDocument>.Update.Set(i => i.Quantity, newQuantity)
+                        .Set(i => i.PriceAtAdd, bundle.PriceFor(bundle.VariantsById[variantId])));
                 if (result.ModifiedCount == 0) continue;
             }
             else
@@ -80,7 +81,9 @@ internal sealed class CartService(IMongoDatabase db, CounterService counters, Pr
                         CartId = cart.CartId,
                         VariantId = variantId,
                         Quantity = newQuantity,
-                        AddedAt = DateTime.UtcNow
+                        AddedAt = DateTime.UtcNow,
+                        Selected = true,
+                        PriceAtAdd = bundle.PriceFor(bundle.VariantsById[variantId])
                     });
                 }
                 catch (MongoWriteException exception) when (exception.WriteError?.Code == 11000)
@@ -94,6 +97,105 @@ internal sealed class CartService(IMongoDatabase db, CounterService counters, Pr
         }
 
         return (null, Results.Conflict(new { message = "The cart was modified concurrently. Please retry." }));
+    }
+
+    /// <summary>Changes the quantity of a line and/or ticks it for checkout.</summary>
+    public async Task<(CartResponse? Cart, IResult? Error)> UpdateItemAsync(
+        long userId, long variantId, int? quantity, bool? selected)
+    {
+        var cart = await FindActiveCartAsync(userId);
+        var line = cart is null ? null : await items.Find(i => i.CartId == cart.CartId && i.VariantId == variantId).FirstOrDefaultAsync();
+        if (cart is null || line is null) return (null, Results.NotFound(new { message = "Cart item not found." }));
+
+        var update = Builders<CartItemDocument>.Update;
+        var changes = new List<UpdateDefinition<CartItemDocument>>();
+        if (quantity is { } wanted)
+        {
+            var bundle = await catalog.LoadForVariantsAsync([variantId]);
+            if (!bundle.VariantsById.TryGetValue(variantId, out var variant)
+                || variant.Status != "active"
+                || bundle.Products.GetValueOrDefault(variant.ProductId)?.Status != "active")
+            {
+                return (null, Results.Conflict(new { message = "This product is no longer available; remove it from the cart." }));
+            }
+
+            var available = bundle.AvailableFor(variantId);
+            if (wanted > available) return (null, OutOfStock(available));
+            changes.Add(update.Set(i => i.Quantity, wanted));
+        }
+        if (selected is { } tick) changes.Add(update.Set(i => i.Selected, tick));
+
+        await items.UpdateOneAsync(i => i.CartItemId == line.CartItemId, update.Combine(changes));
+        await Touch(cart);
+        return (await BuildResponseAsync(cart), null);
+    }
+
+    /// <summary>
+    /// Merges the cart a visitor built before logging in: quantities are added to the account cart and
+    /// capped at the available stock; lines that cannot be bought are reported and skipped.
+    /// </summary>
+    public async Task<MergeCartResponse> MergeAsync(long userId, IReadOnlyList<(long VariantId, int Quantity)> lines)
+    {
+        var bundle = await catalog.LoadForVariantsAsync(lines.Select(l => l.VariantId).ToArray());
+        var cart = await GetOrCreateCartAsync(userId);
+        var results = new List<MergeLineResult>();
+        foreach (var (variantId, requested) in lines)
+        {
+            if (!bundle.VariantsById.TryGetValue(variantId, out var variant)
+                || variant.Status != "active"
+                || bundle.Products.GetValueOrDefault(variant.ProductId)?.Status != "active")
+            {
+                results.Add(new MergeLineResult(variantId, requested, 0, 0, "unavailable"));
+                continue;
+            }
+
+            var cap = Math.Min(bundle.AvailableFor(variantId), MaxQuantityPerAdd);
+            var done = false;
+            for (var attempt = 0; attempt < 3 && !done; attempt++)
+            {
+                var existing = await items.Find(i => i.CartId == cart.CartId && i.VariantId == variantId).FirstOrDefaultAsync();
+                var current = existing?.Quantity ?? 0;
+                var target = Math.Min(cap, current + requested);
+                if (target <= current)
+                {
+                    results.Add(new MergeLineResult(variantId, requested, 0, current, cap <= 0 ? "out_of_stock" : "capped"));
+                    done = true;
+                    break;
+                }
+
+                if (existing is not null)
+                {
+                    var changed = await items.UpdateOneAsync(
+                        i => i.CartItemId == existing.CartItemId && i.Quantity == existing.Quantity,
+                        Builders<CartItemDocument>.Update.Set(i => i.Quantity, target));
+                    if (changed.ModifiedCount == 0) continue;
+                }
+                else
+                {
+                    try
+                    {
+                        await items.InsertOneAsync(new CartItemDocument
+                        {
+                            CartItemId = await counters.NextAsync("cart_items"), CartId = cart.CartId, VariantId = variantId,
+                            Quantity = target, AddedAt = DateTime.UtcNow, Selected = true, PriceAtAdd = bundle.PriceFor(variant)
+                        });
+                    }
+                    catch (MongoWriteException exception) when (exception.WriteError?.Code == 11000)
+                    {
+                        continue;
+                    }
+                }
+
+                results.Add(new MergeLineResult(variantId, requested, target - current, target,
+                    target < current + requested ? "capped" : "added"));
+                done = true;
+            }
+
+            if (!done) results.Add(new MergeLineResult(variantId, requested, 0, 0, "conflict"));
+        }
+
+        await Touch(cart);
+        return new MergeCartResponse(await BuildResponseAsync(cart), [.. results]);
     }
 
     private static IResult OutOfStock(int available) => Results.Conflict(new
@@ -163,11 +265,14 @@ internal sealed class CartService(IMongoDatabase db, CounterService counters, Pr
                 bundle.ImagesByProduct.GetValueOrDefault(product.ProductId)?.FirstOrDefault()?.ImageUrl,
                 variant.Sku, bundle.SizeNames.GetValueOrDefault(variant.SizeId),
                 color?.Name, color?.HexCode, price, line.Quantity, available,
-                (price ?? 0) * line.Quantity, purchasable));
+                (price ?? 0) * line.Quantity, purchasable,
+                line.Selected ?? true, line.PriceAtAdd, line.PriceAtAdd is { } added && price is { } now && added != now));
         }
 
         var payable = responses.Where(r => r.IsPurchasable).ToArray();
+        var chosen = payable.Where(r => r.Selected).ToArray();
         return new CartResponse(cart.CartId, responses.ToArray(),
-            responses.Sum(r => r.Quantity), payable.Sum(r => r.LineTotal));
+            responses.Sum(r => r.Quantity), payable.Sum(r => r.LineTotal),
+            chosen.Sum(r => r.Quantity), chosen.Sum(r => r.LineTotal));
     }
 }

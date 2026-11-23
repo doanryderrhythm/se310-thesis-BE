@@ -1,4 +1,5 @@
 using System.IdentityModel.Tokens.Jwt;
+using System.Threading.RateLimiting;
 using System.Security.Claims;
 using System.Text;
 using System.Text.RegularExpressions;
@@ -11,6 +12,7 @@ using AuthApi.Features.Inventory;
 using AuthApi.Features.Orders;
 using AuthApi.Features.Notifications;
 using AuthApi.Features.Products;
+using AuthApi.Features.Purchasing;
 using AuthApi.Features.Promotions;
 using AuthApi.Features.Reports;
 using AuthApi.Features.Returns;
@@ -63,6 +65,27 @@ builder.Services
         };
     });
 builder.Services.AddAuthorization();
+
+// Brute-force guard for login/register: a fixed window per client address. 0 turns it off
+// (the e2e scripts do), compose uses RateLimit__AuthPerMinute.
+var authPerMinute = builder.Configuration.GetValue("RateLimit:AuthPerMinute", 10);
+builder.Services.AddRateLimiter(options =>
+{
+    options.RejectionStatusCode = StatusCodes.Status429TooManyRequests;
+    options.OnRejected = async (context, token) =>
+    {
+        if (context.Lease.TryGetMetadata(MetadataName.RetryAfter, out var retryAfter))
+            context.HttpContext.Response.Headers.RetryAfter = ((int)retryAfter.TotalSeconds).ToString();
+        context.HttpContext.Response.ContentType = "application/json";
+        await context.HttpContext.Response.WriteAsJsonAsync(
+            new { message = "Too many attempts. Please wait a moment and try again." }, token);
+    };
+    options.AddPolicy("auth", httpContext => authPerMinute <= 0
+        ? RateLimitPartition.GetNoLimiter("off")
+        : RateLimitPartition.GetFixedWindowLimiter(
+            httpContext.Connection.RemoteIpAddress?.ToString() ?? "unknown",
+            _ => new FixedWindowRateLimiterOptions { PermitLimit = authPerMinute, Window = TimeSpan.FromMinutes(1), QueueLimit = 0 }));
+});
 builder.Services.AddSingleton<EmailQueue>();
 builder.Services.AddHostedService<EmailSenderWorker>();
 
@@ -76,6 +99,7 @@ await InitializeAddressCounterAsync(deliveryAddresses, counters);
 
 app.UseAuthentication();
 app.UseAuthorization();
+app.UseRateLimiter();
 
 var counterService = new AuthApi.Data.CounterService(counters);
 await NotificationService.SetupAsync(mongoDatabase, counterService);
@@ -83,6 +107,11 @@ await PromotionSetup.SetupAsync(mongoDatabase, counterService);
 await InventoryService.SetupAsync(mongoDatabase, counterService);
 await AdminOrderService.SetupAsync(mongoDatabase, counterService);
 await CatalogSetup.SetupAsync(mongoDatabase, counterService);
+await AdminAttributeService.SetupAsync(mongoDatabase, counterService, AttributeKind.Material);
+await AdminAttributeService.SetupAsync(mongoDatabase, counterService, AttributeKind.Occasion);
+await MediaEndpoints.SetupAsync(mongoDatabase, counterService);
+await SupplierService.SetupAsync(mongoDatabase, counterService);
+await GoodsReceiptService.SetupAsync(mongoDatabase, counterService);
 await ReturnService.SetupAsync(mongoDatabase, counterService);
 var notificationService = new NotificationService(mongoDatabase, counterService);
 var voucherIssuer = new VoucherIssuer(
@@ -123,7 +152,7 @@ app.MapPost("/api/auth/register", async (RegisterRequest request) =>
     }
 
     return Results.Ok(CreateAuthResponse(user, tokenKey));
-});
+}).RequireRateLimiting("auth");
 
 app.MapPost("/api/auth/login", async (LoginRequest request) =>
 {
@@ -146,7 +175,40 @@ app.MapPost("/api/auth/login", async (LoginRequest request) =>
     }
 
     return Results.Ok(CreateAuthResponse(user, tokenKey));
-});
+}).RequireRateLimiting("auth");
+
+// Change the password of the signed-in account (customer or admin). Tokens issued before the change stop
+// working; the response carries a fresh one for this session.
+async Task<IResult> ChangePasswordAsync(HttpContext context, string role, ChangePasswordRequest request)
+{
+    var (user, error) = await new AuthApi.Security.CurrentUserService(users).ResolveAsync(context, role);
+    if (error is not null) return error;
+
+    var errors = new Dictionary<string, string[]>();
+    if (string.IsNullOrEmpty(request.CurrentPassword))
+        errors["currentPassword"] = ["Current password is required."];
+    if (!AuthApi.Features.Auth.AccountValidator.IsValidPassword(request.NewPassword))
+        errors["newPassword"] = ["Password must be at least 8 characters and no more than 72 UTF-8 bytes."];
+    else if (request.NewPassword == request.CurrentPassword)
+        errors["newPassword"] = ["The new password must be different from the current one."];
+    if (errors.Count > 0) return Results.ValidationProblem(errors);
+
+    if (!BCrypt.Net.BCrypt.Verify(request.CurrentPassword, user!.PasswordHash))
+        return Results.ValidationProblem(new Dictionary<string, string[]> { ["currentPassword"] = ["Current password is incorrect."] });
+
+    var now = DateTime.UtcNow;
+    user.PasswordHash = BCrypt.Net.BCrypt.HashPassword(request.NewPassword!, workFactor: 12);
+    user.PasswordChangedAt = now;
+    await users.UpdateOneAsync(candidate => candidate.UserId == user.UserId,
+        Builders<User>.Update.Set(candidate => candidate.PasswordHash, user.PasswordHash)
+            .Set(candidate => candidate.PasswordChangedAt, now).Set(candidate => candidate.UpdatedAt, now));
+    return Results.Ok(CreateAuthResponse(user, tokenKey));
+}
+
+app.MapPost("/api/customers/me/password", (HttpContext context, ChangePasswordRequest request) =>
+    ChangePasswordAsync(context, "customer", request)).RequireAuthorization().RequireRateLimiting("auth");
+app.MapPost("/api/admin/me/password", (HttpContext context, ChangePasswordRequest request) =>
+    ChangePasswordAsync(context, "admin", request)).RequireAuthorization().RequireRateLimiting("auth");
 
 app.MapGet("/api/products/search", async (string? name, long? categoryId) =>
 {
@@ -159,7 +221,8 @@ app.MapGet("/api/products/search", async (string? name, long? categoryId) =>
     }
 
     var namePattern = new BsonRegularExpression(Regex.Escape(name.Trim()), "i");
-    var productFilter = Builders<ProductDocument>.Filter.Regex(product => product.Name, namePattern);
+    var productFilter = Builders<ProductDocument>.Filter.Regex(product => product.Name, namePattern)
+        & Builders<ProductDocument>.Filter.Eq(product => product.Status, "active");
     if (categoryId.HasValue)
         productFilter &= Builders<ProductDocument>.Filter.Eq(product => product.CategoryId, categoryId.Value);
 
@@ -177,8 +240,8 @@ app.MapGet("/api/products/search", async (string? name, long? categoryId) =>
     var productIds = matchingProducts.Select(product => product.ProductId).ToArray();
     var matchingImages = await productImages
         .Find(Builders<ProductImageDocument>.Filter.In(image => image.ProductId, productIds))
-        .SortBy(image => image.ImageId)
         .ToListAsync();
+    matchingImages = [.. matchingImages.OrderBy(image => image.SortOrder ?? int.MaxValue).ThenBy(image => image.ImageId)];
     var matchingVariants = await productVariants
         .Find(Builders<ProductVariantDocument>.Filter.In(variant => variant.ProductId, productIds))
         .SortBy(variant => variant.VariantId)
@@ -240,7 +303,7 @@ app.MapGet("/api/products/search", async (string? name, long? categoryId) =>
 
 await AuthApi.Features.Carts.CartService.SetupAsync(mongoDatabase, counterService);
 await AuthApi.Features.Reviews.ReviewEndpoints.SetupAsync(mongoDatabase, counterService);
-app.MapProductEndpoints(mongoDatabase);
+app.MapProductEndpoints(mongoDatabase, builder.Configuration);
 app.MapCartEndpoints(mongoDatabase, users, counterService);
 app.MapReviewEndpoints(mongoDatabase, users, counterService);
 app.MapAdminReviewEndpoints(mongoDatabase, users);
@@ -253,15 +316,27 @@ var couponService = new CouponService(mongoDatabase, counterService, catalogServ
 var inventoryService = new InventoryService(mongoDatabase, counterService);
 app.MapCampaignEndpoints(users, new CampaignService(mongoDatabase, counterService, voucherIssuer));
 app.MapCouponEndpoints(users, couponService);
+var materialService = new AdminAttributeService(mongoDatabase, counterService, AttributeKind.Material);
+var occasionService = new AdminAttributeService(mongoDatabase, counterService, AttributeKind.Occasion);
 app.MapAdminCatalogEndpoints(users, new AdminTaxonomyService(mongoDatabase, counterService),
-    new AdminProductService(mongoDatabase, counterService, inventoryService));
+    new AdminProductService(mongoDatabase, counterService, inventoryService, materialService, occasionService),
+    materialService, occasionService);
 app.MapAdminInventoryEndpoints(users, new AdminInventoryService(mongoDatabase, inventoryService));
-app.MapMediaEndpoints(users, builder.Configuration["Uploads:Path"] ?? Path.Combine(app.Environment.ContentRootPath, "uploads"));
+app.MapPurchasingEndpoints(users, new SupplierService(mongoDatabase, counterService),
+    new GoodsReceiptService(mongoDatabase, counterService, inventoryService, app.Logger), builder.Configuration);
+app.MapMediaEndpoints(users, mongoDatabase, counterService,
+    builder.Configuration["Uploads:Path"] ?? Path.Combine(app.Environment.ContentRootPath, "uploads"));
 app.MapReportEndpoints(users, new ReportService(mongoDatabase));
 app.MapReturnEndpoints(users, new ReturnService(
     mongoDatabase, counterService, inventoryService, notificationService, app.Logger));
-app.MapAdminOrderEndpoints(users, new AdminOrderService(
-    mongoDatabase, counterService, inventoryService, couponService, voucherIssuer, notificationService, app.Logger));
+var adminOrderService = new AdminOrderService(
+    mongoDatabase, counterService, inventoryService, couponService, voucherIssuer, notificationService, app.Logger);
+app.MapAdminOrderEndpoints(users, adminOrderService);
+var bankAccount = builder.Configuration["Store:BankAccountNumber"];
+app.MapCustomerOrderEndpoints(users, new CustomerOrderService(mongoDatabase, adminOrderService,
+    string.IsNullOrWhiteSpace(bankAccount)
+        ? null
+        : new BankTransferInfo(builder.Configuration["Store:BankName"], bankAccount, builder.Configuration["Store:BankAccountName"])));
 app.MapNotificationEndpoints(users, notificationService);
 
 app.Run();
@@ -339,7 +414,8 @@ static AuthResponse CreateAuthResponse(User user, SymmetricSecurityKey tokenKey)
         new Claim(JwtRegisteredClaimNames.Sub, user.UserId.ToString()),
         new Claim(ClaimTypes.NameIdentifier, user.UserId.ToString()),
         new Claim(ClaimTypes.Name, user.FullName),
-        new Claim(ClaimTypes.Role, user.Role)
+        new Claim(ClaimTypes.Role, user.Role),
+        new Claim(JwtRegisteredClaimNames.Iat, DateTimeOffset.UtcNow.ToUnixTimeSeconds().ToString(), ClaimValueTypes.Integer64)
     };
     var token = new JwtSecurityToken(
         issuer: "se310-thesis-BE",
@@ -356,6 +432,7 @@ static AuthResponse CreateAuthResponse(User user, SymmetricSecurityKey tokenKey)
 
 internal sealed record RegisterRequest(string? FullName, string? Phone, string? Password, string? Email = null);
 internal sealed record LoginRequest(string? Phone, string? Password);
+internal sealed record ChangePasswordRequest(string? CurrentPassword, string? NewPassword);
 internal sealed record AuthResponse(string AccessToken, DateTime ExpiresAt, UserResponse User);
 internal sealed record UserResponse(long UserId, string FullName, string Phone, string Role, string? Email = null);
 internal sealed record ProductResponse(
@@ -411,6 +488,11 @@ internal sealed class User
     [BsonElement("status_changed_at")]
     [BsonIgnoreIfNull]
     public DateTime? StatusChangedAt { get; set; }
+
+    /// <summary>Tokens issued before this moment are rejected (see CurrentUserService).</summary>
+    [BsonElement("password_changed_at")]
+    [BsonIgnoreIfNull]
+    public DateTime? PasswordChangedAt { get; set; }
 }
 
 [BsonIgnoreExtraElements]
@@ -498,6 +580,23 @@ internal sealed class ProductDocument
     [BsonElement("slug")]
     public string? Slug { get; set; }
 
+    [BsonElement("material_id")]
+    [BsonIgnoreIfNull]
+    public long? MaterialId { get; set; }
+
+    [BsonElement("occasion_ids")]
+    [BsonIgnoreIfNull]
+    public List<long>? OccasionIds { get; set; }
+
+    [BsonElement("care_instructions")]
+    [BsonIgnoreIfNull]
+    public string? CareInstructions { get; set; }
+
+    /// <summary>Lower-cased, accent-free name + description used by the public search.</summary>
+    [BsonElement("search_text")]
+    [BsonIgnoreIfNull]
+    public string? SearchText { get; set; }
+
     [BsonElement("created_at")]
     public DateTime? CreatedAt { get; set; }
 
@@ -553,6 +652,40 @@ internal sealed class ProductImageDocument
 
     [BsonElement("sort_order")]
     public int? SortOrder { get; set; }
+
+    [BsonElement("is_primary")]
+    [BsonIgnoreIfNull]
+    public bool? IsPrimary { get; set; }
+
+    /// <summary>Set when the image came from the upload pipeline (see MediaEndpoints).</summary>
+    [BsonElement("media_id")]
+    [BsonIgnoreIfNull]
+    public long? MediaId { get; set; }
+
+    [BsonElement("media_file")]
+    [BsonIgnoreIfNull]
+    public string? MediaFile { get; set; }
+
+    [BsonElement("width")]
+    [BsonIgnoreIfNull]
+    public int? Width { get; set; }
+
+    [BsonElement("height")]
+    [BsonIgnoreIfNull]
+    public int? Height { get; set; }
+
+    [BsonElement("widths")]
+    [BsonIgnoreIfNull]
+    public List<int>? Widths { get; set; }
+
+    /// <summary>Focus point 0..1 used for object-position when the frame crops the photo.</summary>
+    [BsonElement("focal_x")]
+    [BsonIgnoreIfNull]
+    public double? FocalX { get; set; }
+
+    [BsonElement("focal_y")]
+    [BsonIgnoreIfNull]
+    public double? FocalY { get; set; }
 }
 
 [BsonIgnoreExtraElements]
@@ -591,6 +724,10 @@ internal sealed class SizeDocument
 
     [BsonElement("status")]
     public string? Status { get; set; }
+
+    [BsonElement("display_order")]
+    [BsonIgnoreIfNull]
+    public int? DisplayOrder { get; set; }
 }
 
 [BsonIgnoreExtraElements]
@@ -629,4 +766,9 @@ internal sealed class InventoryDocument
 
     [BsonElement("quantity_reserved")]
     public int? QuantityReserved { get; set; }
+
+    /// <summary>Moving average of the unit cost of received goods (goods receipts).</summary>
+    [BsonElement("average_cost")]
+    [BsonIgnoreIfNull]
+    public double? AverageCost { get; set; }
 }

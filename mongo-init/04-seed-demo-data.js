@@ -44,7 +44,7 @@ if (db.wards.countDocuments({ province_code: 79 }) === 0) {
 
 // ---- 0b. remove the previous demo data -----------------------------------------------------
 for (const name of ["orders", "order_items", "order_status_history", "returns", "coupon_usages",
-                    "product_reviews", "addresses", "inventory_movements"]) {
+                    "product_reviews", "addresses", "inventory_movements", "goods_receipts", "suppliers"]) {
   db.getCollection(name).deleteMany({ is_demo: true });
 }
 
@@ -107,6 +107,10 @@ customers.forEach((c, i) => {
 // ---- 2. stock baseline (same rule as 02-seed-products.js) ------------------------------------------
 const variants = db.product_variants.find({}).toArray();
 const productsById = Object.fromEntries(db.products.find({}).toArray().map((p) => [p.product_id, p]));
+const imageByProduct = {};
+for (const image of db.product_images.find({}).sort({ sort_order: 1, image_id: 1 }).toArray()) {
+  if (!(image.product_id in imageByProduct)) imageByProduct[image.product_id] = image.image_url;
+}
 const sizeNames = Object.fromEntries(db.sizes.find({}).toArray().map((s) => [s.size_id, s.name]));
 const colorNames = Object.fromEntries(db.colors.find({}).toArray().map((c) => [c.color_id, c.name]));
 const stock = {};
@@ -122,6 +126,7 @@ const remaining = (v) => stock[v.variant_id].onHand - stock[v.variant_id].reserv
 // ---- 3. orders --------------------------------------------------------------------------------------
 const FAILURE_REASONS = ["unreachable", "wrong_address", "reschedule", "other"];
 let nextOrderItemId = maxId("order_items", "order_item_id");
+let nextMovementId = maxId("inventory_movements", "movement_id");
 let nextHistoryId = maxId("order_status_history", "history_id");
 const orderRows = [];
 const PATH = {
@@ -252,7 +257,7 @@ for (let i = 0; i < ORDER_COUNT; i++) {
     const product = productsById[l.variant.product_id];
     const doc = {
       order_item_id: ++nextOrderItemId, order_id: orderId, variant_id: l.variant.variant_id, product_id: product.product_id,
-      product_name_snapshot: product.name, sku_snapshot: l.variant.sku,
+      product_name_snapshot: product.name, sku_snapshot: l.variant.sku, image_url_snapshot: imageByProduct[product.product_id] || null,
       size_snapshot: sizeNames[l.variant.size_id], color_snapshot: colorNames[l.variant.color_id],
       quantity: l.quantity, unit_price: l.variant.price, discount_amount: itemDiscount,
       line_total: lineGross - itemDiscount, is_demo: true
@@ -357,22 +362,92 @@ for (const order of deliveredOrders) {
   reviewCount++;
 }
 
+// ---- 6b. suppliers and goods receipts ---------------------------------------------------------------------------
+let nextSupplierId = maxId("suppliers", "supplier_id");
+const supplierRows = [
+  { name: "Xưởng may Thành Công", phone: "0283822334", email: "kinhdoanh@thanhcong.example.com",
+    address: "120 Lũy Bán Bích, Tân Phú, TP. Hồ Chí Minh", tax_code: "0312345678", note: "Áo thun, áo sơ mi" },
+  { name: "Công ty TNHH Vải Sợi Hòa Phát", phone: "0243556677", email: "banhang@hoaphat-vai.example.com",
+    address: "35 Nguyễn Trãi, Thanh Xuân, Hà Nội", tax_code: "0108765432", note: "Denim, kaki" },
+  { name: "Cơ sở Minh Anh", phone: "0912000333", email: null, address: "18 Quang Trung, Đà Nẵng", tax_code: null, note: null }
+].map((row) => {
+  const doc = { supplier_id: ++nextSupplierId, status: "active", created_at: new Date(NOW.getTime() - 90 * DAY),
+    updated_at: new Date(NOW.getTime() - 90 * DAY), is_demo: true, ...row };
+  if (doc.email === null) delete doc.email;
+  if (doc.tax_code === null) delete doc.tax_code;
+  if (doc.note === null) delete doc.note;
+  db.suppliers.insertOne(doc);
+  return doc;
+});
+
+let nextReceiptId = maxId("goods_receipts", "receipt_id");
+function receiptLines(startIndex, count, quantity, costRate) {
+  return pool.slice(startIndex, startIndex + count).map((v) => {
+    const product = productsById[v.product_id];
+    const unitCost = Math.round((v.price * costRate) / 1000) * 1000;
+    return { variant_id: v.variant_id, product_id: v.product_id, product_name: product.name, sku: v.sku,
+             size: sizeNames[v.size_id], color: colorNames[v.color_id], quantity, unit_cost: unitCost,
+             line_total: quantity * unitCost, applied: false };
+  });
+}
+const RECEIPT_PLAN = [
+  { supplier: 0, status: "completed", days: 50, invoice: "HD-0001234", lines: receiptLines(0, 3, 20, 0.45), note: "Nhập đợt đầu mùa" },
+  { supplier: 1, status: "completed", days: 25, invoice: "HD-884201", lines: receiptLines(10, 2, 30, 0.5), note: null },
+  { supplier: 0, status: "draft", days: 1, invoice: "HD-0001302", lines: receiptLines(20, 3, 15, 0.45), note: "Chờ kiểm hàng thực tế" },
+  { supplier: 2, status: "draft", days: 0, invoice: null, lines: receiptLines(30, 1, 10, 0.55), note: null },
+  { supplier: 1, status: "cancelled", days: 10, invoice: "HD-884120", lines: receiptLines(5, 2, 12, 0.5), note: null,
+    cancelReason: "Nhà cung cấp báo hết hàng, hủy phiếu nháp." }
+];
+for (const plan of RECEIPT_PLAN) {
+  if (plan.lines.length === 0) continue;
+  const supplier = supplierRows[plan.supplier];
+  const receivedAt = new Date(NOW.getTime() - plan.days * DAY);
+  const receiptId = ++nextReceiptId;
+  const doc = {
+    receipt_id: receiptId, receipt_code: "PN-" + (1000 + receiptId), supplier_id: supplier.supplier_id,
+    supplier_name: supplier.name, received_at: receivedAt, status: plan.status,
+    items: plan.lines.map((l) => ({ ...l, applied: plan.status === "completed" })),
+    total_quantity: plan.lines.reduce((n, l) => n + l.quantity, 0), total_amount: plan.lines.reduce((n, l) => n + l.line_total, 0),
+    created_by: admin.userId, created_at: receivedAt, updated_at: receivedAt, is_demo: true
+  };
+  if (plan.invoice) doc.supplier_invoice_no = plan.invoice;
+  if (plan.note) doc.note = plan.note;
+  if (plan.status === "completed") { doc.completed_at = receivedAt; doc.completed_by = admin.userId; }
+  if (plan.status === "cancelled") { doc.cancelled_at = receivedAt; doc.cancel_reason = plan.cancelReason; }
+  db.goods_receipts.insertOne(doc);
+
+  if (plan.status === "completed") {
+    for (const l of plan.lines) {
+      stock[l.variant_id].onHand += l.quantity;
+      stock[l.variant_id].averageCost = l.unit_cost;
+      db.inventory_movements.insertOne({
+        movement_id: ++nextMovementId, variant_id: l.variant_id, type: "receipt", delta_on_hand: l.quantity, delta_reserved: 0,
+        on_hand_after: stock[l.variant_id].onHand, reserved_after: stock[l.variant_id].reserved,
+        reason: "Goods receipt " + doc.receipt_code, ref_type: "goods_receipt", ref_id: receiptId, actor_id: admin.userId,
+        created_at: receivedAt, is_demo: true
+      });
+    }
+  }
+}
+
 // ---- 7. write the stock back and keep the id counters ahead -----------------------------------------------------
 for (const v of variants) {
   const s = stock[v.variant_id];
-  db.inventory.updateOne({ variant_id: v.variant_id }, {
-    $set: { quantity_on_hand: s.onHand, quantity_reserved: s.reserved, updated_at: NOW }
-  });
+  const set = { quantity_on_hand: s.onHand, quantity_reserved: s.reserved, updated_at: NOW };
+  if (s.averageCost) set.average_cost = s.averageCost;
+  db.inventory.updateOne({ variant_id: v.variant_id }, { $set: set, ...(s.averageCost ? {} : { $unset: { average_cost: "" } }) });
 }
 const counterTargets = {
   users: maxId("users", "user_id"), addresses: maxId("addresses", "address_id"), orders: maxId("orders", "order_id"),
   order_items: maxId("order_items", "order_item_id"), order_status_history: maxId("order_status_history", "history_id"),
   returns: maxId("returns", "return_id"), coupon_usages: maxId("coupon_usages", "coupon_usage_id"),
-  product_reviews: maxId("product_reviews", "review_id")
+  product_reviews: maxId("product_reviews", "review_id"), suppliers: maxId("suppliers", "supplier_id"),
+  goods_receipts: maxId("goods_receipts", "receipt_id"), inventory_movements: maxId("inventory_movements", "movement_id")
 };
 for (const [name, value] of Object.entries(counterTargets)) {
   db.counters.updateOne({ _id: name }, { $max: { sequence_value: value } }, { upsert: true });
 }
 
-print(`Demo data: ${db.orders.countDocuments({ is_demo: true })} orders, ${db.returns.countDocuments({ is_demo: true })} returns, ` +
+print(`Demo data: ${db.suppliers.countDocuments({ is_demo: true })} suppliers, ${db.goods_receipts.countDocuments({ is_demo: true })} goods receipts, ` +
+      `${db.orders.countDocuments({ is_demo: true })} orders, ${db.returns.countDocuments({ is_demo: true })} returns, ` +
       `${db.product_reviews.countDocuments({ is_demo: true })} reviews, ${customers.length} customers + 1 admin (password Demo@12345).`);

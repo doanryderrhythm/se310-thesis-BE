@@ -126,6 +126,80 @@ internal sealed class InventoryService(IMongoDatabase db, CounterService counter
     public Task<bool> RestockAsync(long variantId, int quantity, string refType, long refId, long? actorId, string? reason = null) =>
         ApplyAsync(variantId, Builders<InventoryDocument>.Filter.Empty, quantity, 0, "restock", reason, refType, refId, actorId);
 
+    /// <summary>Stock before a goods receipt line was applied, kept so a failed receipt can be undone exactly.</summary>
+    internal sealed record ReceiveResult(int OnHandBefore, double? AverageCostBefore);
+
+    /// <summary>
+    /// Goods receipt line: stock goes up and the moving-average unit cost is updated in one atomic step.
+    /// Stock with no known cost takes the cost of the first receipt. Returns null if the variant has no stock row.
+    /// </summary>
+    public async Task<ReceiveResult?> ReceiveAsync(
+        long variantId, int quantity, double unitCost, string refType, long refId, long? actorId, string? reason = null)
+    {
+        var now = DateTime.UtcNow;
+        var onHand = new BsonDocument("$ifNull", new BsonArray { "$quantity_on_hand", 0 });
+        var newOnHand = new BsonDocument("$add", new BsonArray { onHand, quantity });
+        var weighted = new BsonDocument("$round", new BsonArray
+        {
+            new BsonDocument("$divide", new BsonArray
+            {
+                new BsonDocument("$add", new BsonArray
+                {
+                    new BsonDocument("$multiply", new BsonArray { onHand, "$average_cost" }),
+                    new BsonDocument("$multiply", new BsonArray { quantity, unitCost })
+                }),
+                newOnHand
+            }),
+            2
+        });
+        var average = new BsonDocument("$cond", new BsonArray
+        {
+            new BsonDocument("$or", new BsonArray
+            {
+                new BsonDocument("$lte", new BsonArray { onHand, 0 }),
+                new BsonDocument("$eq", new BsonArray { new BsonDocument("$ifNull", new BsonArray { "$average_cost", BsonNull.Value }), BsonNull.Value })
+            }),
+            unitCost,
+            weighted
+        });
+        var pipeline = new EmptyPipelineDefinition<InventoryDocument>().AppendStage<InventoryDocument, InventoryDocument, InventoryDocument>(
+            new BsonDocument("$set", new BsonDocument
+            {
+                { "average_cost", average }, { "quantity_on_hand", newOnHand }, { "updated_at", now }
+            }));
+        var before = await inventory.FindOneAndUpdateAsync(
+            Builders<InventoryDocument>.Filter.Eq(i => i.VariantId, variantId),
+            new PipelineUpdateDefinition<InventoryDocument>(pipeline),
+            new FindOneAndUpdateOptions<InventoryDocument> { ReturnDocument = ReturnDocument.Before });
+        if (before is null) return null;
+
+        var beforeOnHand = before.QuantityOnHand ?? 0;
+        await RecordAsync(variantId, "receipt", quantity, 0, beforeOnHand + quantity, before.QuantityReserved ?? 0,
+            reason, refType, refId, actorId, now);
+        return new ReceiveResult(beforeOnHand, before.AverageCost);
+    }
+
+    /// <summary>Takes a receipt line back (receipt failed half way): stock and average cost return to what they were.</summary>
+    public async Task UndoReceiveAsync(
+        long variantId, int quantity, double? averageCostBefore, string refType, long refId, long? actorId)
+    {
+        var now = DateTime.UtcNow;
+        var pipeline = new EmptyPipelineDefinition<InventoryDocument>().AppendStage<InventoryDocument, InventoryDocument, InventoryDocument>(
+            new BsonDocument("$set", new BsonDocument
+            {
+                { "quantity_on_hand", new BsonDocument("$subtract", new BsonArray { new BsonDocument("$ifNull", new BsonArray { "$quantity_on_hand", 0 }), quantity }) },
+                { "average_cost", averageCostBefore is { } cost ? new BsonDouble(cost) : BsonNull.Value },
+                { "updated_at", now }
+            }));
+        var after = await inventory.FindOneAndUpdateAsync(
+            Builders<InventoryDocument>.Filter.Eq(i => i.VariantId, variantId),
+            new PipelineUpdateDefinition<InventoryDocument>(pipeline),
+            new FindOneAndUpdateOptions<InventoryDocument> { ReturnDocument = ReturnDocument.After });
+        if (after is null) return;
+        await RecordAsync(variantId, "compensation", -quantity, 0, after.QuantityOnHand ?? 0, after.QuantityReserved ?? 0,
+            "Rolled back: the goods receipt did not complete", refType, refId, actorId, now);
+    }
+
     /// <summary>Manual correction by an admin; never lets on-hand drop below what is reserved.</summary>
     public Task<bool> AdjustAsync(long variantId, bool increase, int quantity, string reason, long actorId) =>
         increase

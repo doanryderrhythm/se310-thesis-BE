@@ -8,7 +8,8 @@ internal static class AdminCatalogEndpoints
 {
     public static void MapAdminCatalogEndpoints(
         this IEndpointRouteBuilder app, IMongoCollection<User> users,
-        AdminTaxonomyService taxonomy, AdminProductService productService)
+        AdminTaxonomyService taxonomy, AdminProductService productService,
+        AdminAttributeService materials, AdminAttributeService occasions)
     {
         var currentUsers = new CurrentUserService(users);
         Task<(User? User, IResult? Error)> Admin(HttpContext c) => currentUsers.ResolveAsync(c, UserRoles.Admin);
@@ -87,6 +88,56 @@ internal static class AdminCatalogEndpoints
             return updateError ?? Results.Ok(color);
         });
 
+        admin.MapDelete("/sizes/{id:long}", async (HttpContext c, long id) =>
+        {
+            var (_, error) = await Admin(c);
+            return error ?? await taxonomy.DeleteSizeAsync(id);
+        });
+        admin.MapDelete("/colors/{id:long}", async (HttpContext c, long id) =>
+        {
+            var (_, error) = await Admin(c);
+            return error ?? await taxonomy.DeleteColorAsync(id);
+        });
+
+        // ---- Materials (chất liệu) and occasions (công dụng)
+        foreach (var (route, service) in new[] { ("/materials", materials), ("/occasions", occasions) })
+        {
+            admin.MapGet(route, async (HttpContext c, string? q, string? status) =>
+            {
+                var (_, error) = await Admin(c);
+                if (error is not null) return error;
+                if (status is not (null or "" or "active" or "hidden"))
+                    return Results.ValidationProblem(new Dictionary<string, string[]> { ["status"] = ["Status must be active or hidden."] });
+                return Results.Ok(await service.ListAsync(q, status));
+            });
+            admin.MapGet(route + "/{id:long}", async (HttpContext c, long id) =>
+            {
+                var (_, error) = await Admin(c);
+                if (error is not null) return error;
+                var row = await service.GetAsync(id);
+                return row is null ? Results.NotFound() : Results.Ok(row);
+            });
+            admin.MapPost(route, async (HttpContext c, AttributeRequest r) =>
+            {
+                var (_, error) = await Admin(c);
+                if (error is not null) return error;
+                var (row, createError) = await service.CreateAsync(r);
+                return createError ?? Results.Created($"/api/admin{route}/{row!.Id}", row);
+            });
+            admin.MapPatch(route + "/{id:long}", async (HttpContext c, long id, AttributeRequest r) =>
+            {
+                var (_, error) = await Admin(c);
+                if (error is not null) return error;
+                var (row, updateError) = await service.UpdateAsync(id, r);
+                return updateError ?? Results.Ok(row);
+            });
+            admin.MapDelete(route + "/{id:long}", async (HttpContext c, long id) =>
+            {
+                var (_, error) = await Admin(c);
+                return error ?? await service.DeleteAsync(id);
+            });
+        }
+
         // ---- Size charts (A05)
         admin.MapGet("/size-charts", async (HttpContext c, long? categoryId) =>
         {
@@ -114,6 +165,13 @@ internal static class AdminCatalogEndpoints
             var (chart, saveError) = await taxonomy.SaveChartAsync(id, r);
             return saveError ?? Results.Ok(chart);
         });
+        admin.MapPost("/size-charts/{id:long}/duplicate", async (HttpContext c, long id, DuplicateSizeChartRequest? r) =>
+        {
+            var (_, error) = await Admin(c);
+            if (error is not null) return error;
+            var (chart, saveError) = await taxonomy.DuplicateChartAsync(id, r ?? new DuplicateSizeChartRequest(null));
+            return saveError ?? Results.Created($"/api/admin/size-charts/{chart!.SizeChartId}", chart);
+        });
         admin.MapDelete("/size-charts/{id:long}", async (HttpContext c, long id) =>
         {
             var (_, error) = await Admin(c);
@@ -122,7 +180,7 @@ internal static class AdminCatalogEndpoints
 
         // ---- Products (A02 / A03)
         admin.MapGet("/products", async (HttpContext c, string? q, long? categoryId, string? status, string? sort,
-            int? page, int? pageSize) =>
+            int? page, int? pageSize, long? materialId, long? occasionId) =>
         {
             var (_, error) = await Admin(c);
             if (error is not null) return error;
@@ -132,7 +190,7 @@ internal static class AdminCatalogEndpoints
             var bad = Paging.TryGet(page, pageSize, out var p, out var ps);
             if (bad is not null) return bad;
             if (errors.Count > 0) return Results.ValidationProblem(errors);
-            return Results.Ok(await productService.ListAsync(q, categoryId, status, sort, p, ps));
+            return Results.Ok(await productService.ListAsync(q, categoryId, status, sort, p, ps, materialId, occasionId));
         });
         admin.MapPost("/products", async (HttpContext c, CreateProductRequest r) =>
         {

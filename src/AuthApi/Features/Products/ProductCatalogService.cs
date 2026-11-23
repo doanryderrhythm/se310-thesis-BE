@@ -12,6 +12,9 @@ internal sealed class SizeChartDocument
     [BsonElement("description")] public string? Description { get; set; }
     [BsonElement("category_id")] public long? CategoryId { get; set; }
     [BsonElement("created_at")] public DateTime? CreatedAt { get; set; }
+    [BsonElement("updated_at")] [BsonIgnoreIfNull] public DateTime? UpdatedAt { get; set; }
+    /// <summary>The chart shown for products of the category that have no chart of their own.</summary>
+    [BsonElement("is_default")] [BsonIgnoreIfNull] public bool? IsDefault { get; set; }
 }
 
 [BsonIgnoreExtraElements]
@@ -25,6 +28,11 @@ internal sealed class SizeChartItemDocument
     [BsonElement("hip_cm")] public double? HipCm { get; set; }
     [BsonElement("length_cm")] public double? LengthCm { get; set; }
     [BsonElement("notes")] public string? Notes { get; set; }
+    [BsonElement("height_min_cm")] [BsonIgnoreIfNull] public double? HeightMinCm { get; set; }
+    [BsonElement("height_max_cm")] [BsonIgnoreIfNull] public double? HeightMaxCm { get; set; }
+    [BsonElement("weight_min_kg")] [BsonIgnoreIfNull] public double? WeightMinKg { get; set; }
+    [BsonElement("weight_max_kg")] [BsonIgnoreIfNull] public double? WeightMaxKg { get; set; }
+    [BsonElement("display_order")] [BsonIgnoreIfNull] public int? DisplayOrder { get; set; }
 }
 
 internal sealed class CatalogBundle
@@ -86,9 +94,18 @@ internal sealed class ProductCatalogService(IMongoDatabase db)
         if (sizeChartId is null) return null;
         var chart = await sizeCharts.Find(c => c.SizeChartId == sizeChartId).FirstOrDefaultAsync();
         if (chart is null) return null;
-        var items = await sizeChartItems.Find(i => i.SizeChartId == sizeChartId)
-            .SortBy(i => i.SizeChartItemId).ToListAsync();
-        return (chart, items.ToArray());
+        var items = await sizeChartItems.Find(i => i.SizeChartId == sizeChartId).ToListAsync();
+        return (chart, [.. items.OrderBy(i => i.DisplayOrder ?? int.MaxValue).ThenBy(i => i.SizeChartItemId)]);
+    }
+
+    /// <summary>The product's own size chart, else the default (or first) chart of its category.</summary>
+    public async Task<(SizeChartDocument Chart, SizeChartItemDocument[] Items)?> LoadSizeChartForProductAsync(ProductDocument product)
+    {
+        var own = await LoadSizeChartAsync(product.SizeChartId);
+        if (own is not null) return own;
+        var candidates = await sizeCharts.Find(c => c.CategoryId == product.CategoryId).SortBy(c => c.SizeChartId).ToListAsync();
+        var fallback = candidates.FirstOrDefault(c => c.IsDefault == true) ?? candidates.FirstOrDefault();
+        return fallback is null ? null : await LoadSizeChartAsync(fallback.SizeChartId);
     }
 
     private async Task<CatalogBundle> BuildAsync(
@@ -102,7 +119,8 @@ internal sealed class ProductCatalogService(IMongoDatabase db)
 
         var imageList = await images
             .Find(Builders<ProductImageDocument>.Filter.In(i => i.ProductId, productIds))
-            .SortBy(i => i.ImageId).ToListAsync();
+            .ToListAsync();
+        imageList = [.. imageList.OrderBy(i => i.SortOrder ?? int.MaxValue).ThenBy(i => i.ImageId)];
         var categoryList = await categories
             .Find(Builders<CategoryDocument>.Filter.In(c => c.CategoryId, categoryIds)).ToListAsync();
         var sizeList = await sizes

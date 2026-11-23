@@ -116,17 +116,36 @@ the API only logs "email skipped". Other settings: `Smtp__From`,
 
 | Endpoint | Auth | Request | Success / errors |
 | --- | --- | --- | --- |
-| `GET /api/products/{productId}` | Public | None | `200` with product, images, active variants (`quantityOnHand`, `quantityReserved`, `availableQuantity`, `inStock`), `totalAvailableQuantity`, and `sizeChart`. `404` if missing or inactive. |
-| `GET /api/cart` | Customer | None | `200` with `items`, `totalQuantity`, `subtotal`. Each item has current price, `availableQuantity`, and `isPurchasable`; `subtotal` counts purchasable lines only. |
+| `GET /api/products/{productId}` · `GET /api/products/slug/{slug}` | Public | None | `200` with product (`slug`, `material` text, `materialGroup {id,name,slug}`, `occasions[]`, `careInstructions`), images (see "Product images"), active variants (`sizeId`, `colorId`, `quantityOnHand`, `quantityReserved`, `availableQuantity`, `inStock`), `totalAvailableQuantity`, and `sizeChart` (the product's own chart, else the default chart of its category; rows have height/weight ranges). `404` if missing or not `active`. |
+| `GET /api/cart` | Customer | None | `200` with `items`, `totalQuantity`, `subtotal`, `selectedQuantity`, `selectedSubtotal`. Each item has current price, `availableQuantity`, `isPurchasable`, `selected`, `priceAtAdd` and `priceChanged`; `subtotal` counts purchasable lines, `selectedSubtotal` only the ticked ones (what checkout should use). |
 | `POST /api/cart/items` | Customer | `{"variantId":1,"quantity":2}` (quantity 1–99) | `200` with the updated cart; quantities add up on one line per variant. `400` validation, `404` unknown/inactive variant, `409` if the total would exceed available stock (`availableQuantity` in body). Stock is not reserved. |
+| `PATCH /api/cart/items/{variantId}` | Customer | `{"quantity"?:3,"selected"?:false}` (at least one) | `200` with the cart. `400` for quantity outside 1–99 or an empty body, `404` if the line is not in the cart, `409` above available stock (`availableQuantity`). |
+| `POST /api/cart/merge` | Customer | `{"items":[{"variantId":1,"quantity":2}]}` (≤ 50 lines) | Call once after login to merge the cart a visitor built locally. Quantities add to the account cart, capped at stock. `200 {cart, results:[{variantId, requested, added, quantity, status}]}`; `status` ∈ `added`, `capped`, `out_of_stock`, `unavailable`, `conflict`. |
 | `DELETE /api/cart/items/{variantId}` | Customer | None | `200` with the updated cart, `404` if the line is not in the cart. |
 | `GET /api/products/{productId}/reviews?page=1&pageSize=10` | Public | pageSize 1–50 | `200` with published reviews, `totalCount`, `averageRating`. |
-| `POST /api/products/{productId}/reviews` | Customer | `{"rating":5,"comment":"10-500 characters"}` | `201` (published immediately). `409` if the customer already reviewed the product. |
+| `GET /api/customers/me/reviewable-items` | Customer | None | Products the customer bought in a **delivered** order and has not reviewed yet (one per product, from the latest such order): `{orderCode, orderItemId, productId, productName, imageUrl, sku, size, color, deliveredAt}`. |
+| `POST /api/products/{productId}/reviews` | Customer | `{"rating":5,"comment":"10-500 characters"}` | `201` (published immediately, linked to the order item). `409 {code:"REVIEW_NOT_PURCHASED"}` if the customer has no delivered order with the product, `409` if already reviewed. |
 | `GET /api/customers/me/reviews` | Customer | None | `200` with the customer's own reviews. |
 | `DELETE /api/customers/me/reviews/{reviewId}` | Customer | None | `204`; `404` if not the customer's review. |
 | `DELETE /api/admin/reviews/{reviewId}` | Admin | None | `204`; `404` if missing. |
 
-Reviews are not yet tied to delivered orders (`order_item_id` stays null).
+A review needs a delivered purchase of the product; `order_item_id` is stored.
+
+## Storefront catalog APIs (public)
+
+| Endpoint | Purpose |
+| --- | --- |
+| `GET /api/categories` | Active categories `{categoryId, name, slug, description, displayOrder, productCount}` (active products only) |
+| `GET /api/materials` · `GET /api/occasions` | Active materials (chất liệu: cotton, denim, …) and occasions (công dụng: đi làm, đi chơi, đi học, …) `{id, name, slug, description, displayOrder, productCount}` for the filter checkboxes |
+| `GET /api/products?q=&category=&size=&material=&occasion=&minPrice=&maxPrice=&inStock=&sort=&page=&pageSize=` | Product listing, **active products of active categories only**. `category` = id or slug. `size`, `material`, `occasion` may repeat (`size=M&size=L`) or be comma separated; materials/occasions take slug or id; values within one group are OR, different groups are AND. Size, price range and `inStock=true` must all hold on the **same active variant**. `q` ignores case and accents and matches name + description (every word must match). `sort` = `newest` (default), `price_asc`, `price_desc`, `name_asc`. `pageSize` default 12, max 48. Returns `{items, page, pageSize, totalCount}`; an item is `{productId, slug, name, categoryId, categoryName, priceMin, priceMax, image, hoverImage, colors[], sizes[], inStock, material, materialGroup, occasions[], createdAt}` |
+| `GET /api/products/{id}` · `GET /api/products/slug/{slug}` | Detail (see above) |
+| `GET /api/size-charts/{id}` | A size chart with its rows |
+| `GET /api/products/{id}/size-suggestion?heightCm=&weightKg=` | Suggests a size from the chart's height/weight ranges: `{suggestedSize, matchType: exact\|closest\|none, inStock, candidates[]}`; height 50–250, weight 10–250, at least one of them |
+| `GET /api/storefront/policies` | Shipping fee (30.000đ, free from 500.000đ after discount), return window (7 days), delivery attempts, payment methods, bank-transfer account (from `Store__Bank*`), store name/address/phone, image standard |
+| `GET /api/media-standard` | The product image standard (below) |
+| `GET /api/products/search?name=&categoryId=` | Older name search (max 50, no paging); now returns **active products only**. Prefer `GET /api/products?q=` |
+
+Validation keys: `q`, `minPrice`, `maxPrice`, `sort`, `page`, `heightCm`, `weightKg`.
 
 ## Promotions: campaigns, vouchers, notifications
 
@@ -263,12 +282,14 @@ the time of writing so they can be tested right away):
 
 On an existing volume run, in order, `01-schema.js` (adds the new collections
 and fields: campaigns, vouchers, notifications, returns, inventory movements,
-product slugs, locations, …), then `02-seed-products.js` (refreshes the catalog
-and adds category `display_order`), `02a-seed-locations.js` (the province /
+product slugs, locations, …), then `02-seed-products.js` (refreshes the catalog and adds category `display_order`, the materials and
+occasions lists, product material/occasion/care/search text, image order and size-chart height/weight
+ranges; legacy `inactive` statuses become `hidden`), `02a-seed-locations.js` (the province /
 district / ward catalog; required for addresses), `03-seed-campaigns.js` and optionally
 `04-seed-demo-data.js` (see "Demo data" below), using the same `mongosh`
 command as above. Rebuild the API image afterwards, and start Mailpit with
-`docker compose up -d`. For a real (non-demo) admin, promote a registered
+`docker compose up -d`. Set `Store__*` and `RateLimit__AuthPerMinute` through `.env` (see
+`.env.example`). For a real (non-demo) admin, promote a registered
 account with `db.users.updateOne({phone:"…"},{$set:{role:"admin"}})` in Mongo
 Express or `mongosh`, then log in again. The API creates its indexes and back-fills
 product slugs and category order on startup.
@@ -286,14 +307,23 @@ are UTC ISO-8601.
 
 | Endpoint | Purpose |
 | --- | --- |
-| `GET /api/admin/dashboard?from=&to=` | One call for the home screen (default: last 30 days, max 366): `kpis {orderCount, deliveredCount, grossRevenue, refundAmount, netRevenue, unitsSold}`, `counters {ordersNeedingAction, pendingOrders, pendingReturns, lowStockCount}`, `series` (one point per day `{period, orderCount, deliveredCount, grossRevenue, refundAmount, netRevenue, unitsSold}`), `recentOrders` (5), `lowStock` (5 lowest-stock SKUs), `definitions` |
-| `GET /api/admin/reports?from=&to=&groupBy=day\|week` | Same KPIs + `series` grouped by day or week (weeks start Monday, `period` = first day), `topProducts` (10 by units: `{productId, productName, sku, units, revenue}`), `lowStock` (20), `definitions` |
-| `GET /api/admin/reports/export?from=&to=&groupBy=` | The same series as a CSV download (UTF-8 with BOM for Excel): `period,orders,delivered_orders,gross_revenue,refund_amount,net_revenue,units_sold` plus a `TOTAL` row |
+| `GET /api/admin/dashboard?from=&to=&groupBy=` | One call for the home screen (default: last 30 days, `groupBy` default `day`): `kpis`, `counters {ordersNeedingAction, pendingOrders, pendingReturns, lowStockCount}`, `series`, `recentOrders` (5), `lowStock` (5 lowest-stock SKUs), `definitions` |
+| `GET /api/admin/reports?from=&to=&groupBy=day\|week\|month\|quarter\|year` | KPIs + `series` + `comparison` (the previous period of the same length with `changePercent`) + `topProducts` (10 by units) + `lowStock` (20) + `definitions`. Longest range: `day` 366 days, `week` 731 days, `month`/`quarter`/`year` 1827 days (5 years) |
+| `GET /api/admin/reports/export?from=&to=&groupBy=` | The same series as a CSV download (UTF-8 with BOM for Excel): `period,label,start,end,orders,delivered_orders,cancelled_orders,gross_revenue,merchandise_revenue,shipping_revenue,discount_amount,refund_amount,net_revenue,units_sold,average_order_value` plus a `TOTAL` row |
+
+A series point is `{period, label, start, end, orderCount, deliveredCount, cancelledCount, grossRevenue, merchandiseRevenue, shippingRevenue, discountAmount, refundAmount, netRevenue, unitsSold, averageOrderValue}`.
+`period` is the key (`2026-11-23`, ISO week `2026-W47`, `2026-11`, `2026-Q4`, `2026`), `label` is
+ready-to-show Vietnamese (`Tuần 47/2026 (17/11 – 23/11)`, `Tháng 11/2026`, `Quý 4/2026`,
+`Năm 2026`); `start`/`end` are the full calendar span of the bucket (the first and last bucket of
+a range may be only partly inside it; only orders inside the range are counted). Every bucket of the range
+appears, empty ones as zeros.
 
 KPI definitions (also returned in `definitions` so the UI can show them):
 `orderCount` = orders **placed** in the range (any status); `deliveredCount`,
 `grossRevenue` (sum of `total_amount`, discount applied, shipping included) and
 `unitsSold` = orders **delivered** in the range (by `delivered_at`);
+`merchandiseRevenue + shippingRevenue = grossRevenue` (goods after discount vs. shipping fee), `averageOrderValue = grossRevenue ÷ deliveredCount`,
+`cancelledCount` = orders placed in the range that are now cancelled;
 `refundAmount` = return refunds paid in the range (by refund date; refunds of
 cancelled or returned-to-shop orders are not subtracted because those orders
 never counted as revenue); `netRevenue = grossRevenue − refundAmount`.
@@ -303,18 +333,19 @@ never counted as revenue); `netRevenue = grossRevenue − refundAmount`.
 
 | Endpoint | Purpose |
 | --- | --- |
-| `GET /api/admin/products?q=&categoryId=&status=&sort=newest\|name\|price&page=&pageSize=` | Table: `{productId, name, slug, categoryId, categoryName, status, thumbnailUrl, variantCount, priceMin, priceMax, totalAvailable, createdAt, updatedAt}`. `q` matches name or SKU; `status` = `draft`, `active`, `hidden` |
+| `GET /api/admin/products?q=&categoryId=&materialId=&occasionId=&status=&sort=newest\|name\|price&page=&pageSize=` | Table: `{productId, name, slug, categoryId, categoryName, materialId, materialName, status, thumbnailUrl, variantCount, priceMin, priceMax, totalAvailable, createdAt, updatedAt}`. `q` matches name or SKU; `status` = `draft`, `active`, `hidden` |
 | `POST /api/admin/products` | Create everything in one request (below). `201` with the detail. `400` field errors |
-| `GET /api/admin/products/{id}` | Edit form: info, `images[]`, `variants[]` with `onHand`, `reserved`, `available`, `lowStockThreshold`, `hasOrders` |
-| `PATCH /api/admin/products/{id}` | Partial update of `name`, `slug`, `categoryId`, `description`, `material`, `basePrice`, `sizeChartId` (`0` detaches the chart). Does not touch status, images or variants |
-| `PATCH /api/admin/products/{id}/status` | `{"status":"draft\|active\|hidden"}`. Activating needs a description ≥ 20 chars, ≥ 1 image and ≥ 1 active variant, otherwise `409 {message}` says what is missing. Only `active` products show on the storefront |
-| `PUT /api/admin/products/{id}/images` | Replace the whole gallery `{"images":[{url, altText?, colorId?, sortOrder?}]}`; the first image (lowest `sortOrder`) is the thumbnail; an active product keeps ≥ 1 image |
-| `POST /api/admin/uploads/images` | `multipart/form-data` field `file` (JPEG/PNG/WebP, ≤ 5 MB, checked by content not by name) → `201 {url:"/api/media/<id>.png"}`; put that `url` into an image entry |
+| `GET /api/admin/products/{id}` | Edit form: info (`materialId`, `materialName`, `materialDetail`, `occasions[{id,name}]`, `careInstructions`), `images[]`, `variants[]` with `onHand`, `reserved`, `available`, `lowStockThreshold`, `hasOrders`, and `warnings[]` (fewer than 3 photos, photo not 3:4) |
+| `PATCH /api/admin/products/{id}` | Partial update of `name`, `slug`, `categoryId`, `description`, `materialDetail` (alias `material`), `materialId` (`0` clears), `occasionIds` (replaces the list), `careInstructions`, `basePrice`, `sizeChartId` (`0` detaches the chart). Does not touch status, images or variants |
+| `PATCH /api/admin/products/{id}/status` | `{"status":"draft\|active\|hidden"}`. Activating needs a description ≥ 20 chars, a material, ≥ 1 occasion, ≥ 1 image and ≥ 1 active variant, otherwise `409 {message}` says what is missing. Only `active` products show on the storefront |
+| `PUT /api/admin/products/{id}/images` | Replace the whole gallery `{"images":[{mediaId \| url, altText?, colorId?, sortOrder?, isPrimary?, focalX?, focalY?}]}`; the image flagged `isPrimary` (else the lowest `sortOrder`) comes first and is the thumbnail; an active product keeps ≥ 1 image. Response has `warnings` |
+| `POST /api/admin/uploads/images` | `multipart/form-data` field `file` → `201 {mediaId, url, width, height, aspectRatio, srcset{w400,w800,w1200}, warnings[]}`. See "Product images" |
 | `GET /api/media/{file}` | Public, serves uploaded images (long cache) |
+| `GET/POST /api/admin/materials` · `GET/PATCH/DELETE /api/admin/materials/{id}` · same for `/api/admin/occasions` | Managed lists `{id, name, slug, description, displayOrder, status(active\|hidden), productCount}`; names unique (accent/case-insensitive); `DELETE` is `409` while a product uses it (hide it instead) |
 | `POST /api/admin/products/{id}/variants` · `PATCH /api/admin/variants/{variantId}` · `DELETE /api/admin/variants/{variantId}` | Add (`sku, sizeId, colorId, price?, status?, initialOnHand?, lowStockThreshold?`), edit (`sku, price, status`), delete a variant. Each returns the refreshed product detail. `409` for a duplicate size+colour or SKU, for deleting a variant that is in an order (hide it instead) and for removing the last active variant of an active product |
 | `GET/POST /api/admin/categories` · `GET/PATCH/DELETE /api/admin/categories/{id}` | Categories `{categoryId, name, slug, description, displayOrder, status(active\|hidden), productCount}`; list takes `q`, `status`; `DELETE` is `409` while products or size charts use it |
-| `GET/POST /api/admin/sizes` · `PATCH /api/admin/sizes/{id}` · `GET/POST /api/admin/colors` · `PATCH /api/admin/colors/{id}` | Dropdown data and maintenance (`name`, `hexCode` like `#1A2B3C`, `status`); no delete, hide instead |
-| `GET /api/admin/size-charts?categoryId=` · `GET/PUT/DELETE /api/admin/size-charts/{id}` · `POST /api/admin/size-charts` | Size charts `{name, description, categoryId, items:[{sizeLabel, chestCm, waistCm, hipCm, lengthCm, notes}]}`; `PUT` replaces the rows; `DELETE` is `409` while a product uses the chart |
+| `GET/POST /api/admin/sizes` · `PATCH/DELETE /api/admin/sizes/{id}` · `GET/POST /api/admin/colors` · `PATCH/DELETE /api/admin/colors/{id}` | Dropdown data and maintenance (`name`, `displayOrder` for sizes, `hexCode` like `#1A2B3C`, `status`); `DELETE` is `409` while variants (or images, for colors) use it |
+| `GET /api/admin/size-charts?categoryId=` · `GET/PUT/DELETE /api/admin/size-charts/{id}` · `POST /api/admin/size-charts` · `POST /api/admin/size-charts/{id}/duplicate` | Size charts `{name, description, categoryId, isDefault, items:[{sizeLabel, chestCm, waistCm, hipCm, lengthCm, notes, heightMinCm, heightMaxCm, weightMinKg, weightMaxKg, displayOrder}]}`. `PUT` keeps the id of rows whose label stays; `isDefault` (needs a category; one per category) is the chart shown for products without their own; `duplicate` copies a chart (`{"name"?}`); `DELETE` is `409` while a product uses the chart |
 
 `POST /api/admin/products` body (`status` defaults to `draft`; `slug` is
 generated from the name when omitted; SKUs are unique across the shop):
@@ -323,15 +354,18 @@ generated from the name when omitted; SKUs are unique across the shop):
 {
   "name": "Áo thun cotton basic", "slug": null, "categoryId": 1,
   "description": "At least 20 characters when the product is active.",
-  "material": "Cotton 100%", "basePrice": 199000, "sizeChartId": null, "status": "draft",
-  "images": [{"url": "/api/media/<uploaded>.jpg", "altText": "Mặt trước", "colorId": 1, "sortOrder": 0}],
+  "materialId": 1, "materialDetail": "Cotton 95%, spandex 5%", "occasionIds": [1, 3],
+  "careInstructions": "Giặt nước mát, không dùng chất tẩy.",
+  "basePrice": 199000, "sizeChartId": null, "status": "draft",
+  "images": [{"mediaId": 12, "altText": "Mặt trước", "colorId": 1, "isPrimary": true, "focalX": 0.5, "focalY": 0.3}],
   "variants": [{"sku": "TSHIRT-M-BLK", "sizeId": 2, "colorId": 1, "price": 199000, "status": "active",
-                "initialOnHand": 20, "lowStockThreshold": 5}]
+                "lowStockThreshold": 5}]
 }
 ```
 
-Validation keys to translate: `name`, `slug`, `categoryId`, `description`,
-`material`, `basePrice`, `sizeChartId`, `status`, `images` (list of messages),
+New variants start with **zero stock** (`initialOnHand` above 0 is rejected): stock comes in
+through goods receipts. Validation keys to translate: `name`, `slug`, `categoryId`, `description`,
+`materialId`, `materialDetail`, `occasionIds`, `careInstructions`, `basePrice`, `sizeChartId`, `status`, `images` (list of messages),
 `variants` (list of messages), `sku`, `price`, `displayOrder`, `hexCode`,
 `items`. Product `status` values: `draft`, `active`, `hidden` (older rows with
 `inactive` are returned as `hidden`).
@@ -340,15 +374,46 @@ Validation keys to translate: `name`, `slug`, `categoryId`, `description`,
 
 | Endpoint | Purpose |
 | --- | --- |
-| `GET /api/admin/inventory?q=&lowStock=true&status=active\|hidden&page=&pageSize=` | Rows `{variantId, sku, productId, productName, size, color, variantStatus, onHand, reserved, available, lowStockThreshold, isLow, updatedAt}`; `available = onHand − reserved`; `isLow = available ≤ threshold` |
-| `POST /api/admin/inventory/{variantId}/adjustments` | `{"type":"increase\|decrease","quantity":5,"reason":"10–300 chars"}`; `409` if on-hand would drop below what open orders reserved |
+| `GET /api/admin/inventory?q=&lowStock=true&status=active\|hidden&page=&pageSize=` | Rows `{variantId, sku, productId, productName, size, color, variantStatus, onHand, reserved, available, lowStockThreshold, isLow, updatedAt, averageCost, stockValue}`; `available = onHand − reserved`; `isLow = available ≤ threshold` |
+| `POST /api/admin/inventory/{variantId}/adjustments` | **Decrease only** (damaged, lost, stocktake): `{"reasonCode":"damaged\|lost\|stocktake\|other","quantity":5,"reason":"10–300 chars"}`. `type:"increase"` is `400`: stock goes up through a goods receipt. `409` if more than the available stock |
 | `PATCH /api/admin/inventory/{variantId}` | `{"lowStockThreshold": 5}` |
-| `GET /api/admin/inventory/{variantId}/movements?page=&pageSize=` | History `{type, deltaOnHand, deltaReserved, onHandAfter, reservedAfter, reason, refType, refId, actor, createdAt}`; types `initial`, `adjust_increase`, `adjust_decrease`, `reserve`, `release`, `ship`, `restock` |
+| `GET /api/admin/inventory/{variantId}/movements?page=&pageSize=` | History `{type, deltaOnHand, deltaReserved, onHandAfter, reservedAfter, reason, refType, refId, actor, createdAt}`; types `initial`, `receipt` (goods receipt), `adjust_decrease` (older rows may have `adjust_increase`), `reserve`, `release`, `ship`, `restock`, `compensation` |
 
 Stock rules (shared with the future checkout): placing an order reserves stock;
 cancelling before hand-over releases it; handing over to the carrier
 (`packing → shipping`) takes it off the shelf; goods that pass inspection
 (returned-to-shop orders, customer returns) go back on the shelf.
+
+### Goods receipts: suppliers and stock in (nhập hàng)
+
+Stock goes **up** only through a goods receipt (it goes down automatically when goods are handed over to the
+carrier, and comes back when returned goods pass inspection). A receipt is a draft until completed.
+
+| Endpoint | Purpose |
+| --- | --- |
+| `GET/POST /api/admin/suppliers` · `GET/PATCH/DELETE /api/admin/suppliers/{id}` | Suppliers `{name, phone, email, address, taxCode, note, status(active\|hidden), receiptCount}`; list takes `q`, `status`; name unique; `DELETE` is `409` once it has receipts (hide it) |
+| `GET /api/admin/goods-receipts?q=&status=&supplierId=&from=&to=&page=` | Table `{receiptCode (PN-1001), supplierName, supplierInvoiceNo, receivedAt, itemCount, totalQuantity, totalAmount, status}`; `q` = code, supplier invoice or supplier name; `status` = `draft`, `completed`, `cancelled` |
+| `POST /api/admin/goods-receipts` · `PUT /api/admin/goods-receipts/{code}` | Create / edit a **draft**: `{supplierId, supplierInvoiceNo?, receivedAt?, note?, items:[{variantId, quantity 1–100000, unitCost ≥ 0}]}` (1–200 lines, a variant once; the same supplier invoice number may be on one live receipt only). Stock is not touched yet |
+| `GET /api/admin/goods-receipts/{code}` | Detail with supplier, lines (SKU, size, colour, `currentOnHand`), totals, `canEdit`/`canComplete`/`canCancel` |
+| `POST /api/admin/goods-receipts/{code}/complete` | Adds every line to the stock exactly once (safe against double clicks and crashes), writes an `inventory_movements` row per line (`type:"receipt"`) and updates each variant's moving-average `averageCost`. `409` if already completed/cancelled or a line cannot be applied (everything is rolled back) |
+| `POST /api/admin/goods-receipts/{code}/cancel` | `{"reason":"10–300 chars"}`, drafts only |
+| `GET /api/admin/goods-receipts/{code}/print` | The receipt as a self-contained A4 HTML page (store, supplier, lines, totals, amount in Vietnamese words, signature boxes; has a Print button). Fetch it with the token and open it in a new window, then `window.print()` or "Save as PDF" |
+
+Store name, address and phone on the printout come from `Store__Name`, `Store__Address`, `Store__Phone`.
+Validation keys: `supplierId`, `supplierInvoiceNo`, `receivedAt`, `items` (list), `reason`, `name`, `phone`, `email`, `taxCode`.
+
+### Product images
+
+Standard (also at `GET /api/media-standard`): portrait **3:4** frame like most fashion shops, at least **900 × 1200 px**
+(recommended 1200 × 1600), JPEG / PNG / WebP up to **20 MB**, at least 1 photo to publish and 3 recommended
+(main view, another angle, a material/detail close-up). The upload really decodes the file (not the name or
+content type): it is rotated by its EXIF orientation, converted to sRGB, stripped of metadata and stored as
+WebP (master up to 2400 px on the long side, never enlarged) plus 400 / 800 / 1200 px wide versions
+(`srcset.w400`, `w800`, `w1200`; only those smaller than the master exist). A photo that is not 3:4 is accepted
+with a `warnings[]` entry: set `focalX`/`focalY` (0–1) on the image so the frame crops around the subject
+(`object-position: {focalX*100}% {focalY*100}%`). Images from older data (`/images/products/…`) have no
+size/srcset (`width`, `height`, `srcset` are `null`). Display sizes per place are listed in
+`feat-catalog-purchasing-orders-reports_TODO.md`.
 
 ### Orders (A07, A08)
 
@@ -373,6 +438,28 @@ after `customer_refused`) or `→ returning_to_seller → returned_to_seller`
 `paid` on delivery, cancelling or returning a paid order makes it
 `refund_pending`. Every move is written to `history` and the customer gets an
 in-app notification (`type: "order_status"`).
+
+### Customer: my orders
+
+(Placing an order is built elsewhere; these read and cancel the orders that exist.)
+
+| Endpoint | Purpose |
+| --- | --- |
+| `GET /api/customers/me/orders?status=&q=&from=&to=&page=&pageSize=` | Own orders, newest first (default 10, max 50). `status` = a tab (`all`, `active` = pending/confirmed/packing, `shipping`, `delivered`, `cancelled`, `delivery_failed` = failed + returning + returned) or a comma list of statuses. Item: `{orderCode, status, placedAt, totalAmount, paymentMethod, paymentStatus, itemCount, preview[3], canCancel}` |
+| `GET /api/customers/me/orders/counts` | `{all, active, shipping, delivered, cancelled, deliveryFailed, byStatus}` for the tab badges |
+| `GET /api/customers/me/orders/{orderCode}` | Items (with `imageUrl`, `reviewable`), totals, `couponCode`, payment, `timeline` (status changes), `deliveryAttempts`, `canCancel`, `canReturn`, `returnDeadline`, and `bankTransfer {bankName, accountNumber, accountName, transferContent, amount}` while a transfer is awaiting payment. Someone else's order is `404` |
+| `POST /api/customers/me/orders/{orderCode}/cancel` | `{"reason":"10–300 chars"}`. Only `pending`/`confirmed` (`409` otherwise). Releases the reserved stock and the coupon use, a paid order becomes `refund_pending`, writes the history and notifies |
+
+Order items written by the checkout should also set `image_url_snapshot` (the image shown when ordering).
+
+### Account: change password, rate limit
+
+`POST /api/customers/me/password` and `POST /api/admin/me/password` take
+`{"currentPassword","newPassword"}` (8 characters .. 72 bytes, different from the current one) and return a fresh
+auth response (`accessToken`, `user`); every token issued before the change stops working (`401`). Errors:
+`400` with `currentPassword` / `newPassword`. `POST /api/auth/login`, `/api/auth/register` and the two password
+endpoints allow `RateLimit__AuthPerMinute` calls per minute per client address (default 10, compose 20,
+`0` = off), then answer `429 {message}` with `Retry-After`.
 
 ### Returns (A09, A10) and the customer side
 
@@ -405,7 +492,8 @@ Each step notifies the customer (`type: "return_status"`).
 
 `mongo-init/04-seed-demo-data.js` (run after 01–03 including 02a) creates one admin and eight
 customers (one locked), 45 orders spread over the last 60 days in every status
-(stock and coupon usage consistent with them), 8 returns, 6 reviews and a
+(stock and coupon usage consistent with them), 8 returns, 6 reviews, three suppliers with five goods receipts
+(two completed, two drafts, one cancelled; the completed ones add stock and set average costs) and a
 default address per customer. Log in with password **`Demo@12345`**: admin
 `0900000001`, customers `0900000011`–`0900000018`. The script replaces its own
 previous data and resets every variant's stock to the base seed values, so rerun
@@ -417,7 +505,9 @@ can never overwrite a real user. Uploaded images are stored in the
 ## Frontend integration checklist
 
 > Chi tiết từng fetch (mô tả, API, response mẫu, lỗi, luồng, cách làm trong code FE) nằm trong
-> [`feat-voucher-admin-dashboard_TODO.md`](feat-voucher-admin-dashboard_TODO.md).
+> [`feat-voucher-admin-dashboard_TODO.md`](feat-voucher-admin-dashboard_TODO.md). Phần bổ sung
+> (catalog công khai, chất liệu/công dụng, bảng size, nhập hàng, báo cáo theo kỳ, đơn của khách, chuẩn ảnh)
+> nằm trong [`feat-catalog-purchasing-orders-reports_TODO.md`](feat-catalog-purchasing-orders-reports_TODO.md).
 
 Features the backend now exposes that still need UI work and API wiring in the
 frontend (`src/api.ts`, base `/api`, `Authorization: Bearer <accessToken>`).

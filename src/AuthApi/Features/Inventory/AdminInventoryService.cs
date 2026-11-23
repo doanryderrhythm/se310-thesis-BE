@@ -56,21 +56,28 @@ internal sealed class AdminInventoryService(IMongoDatabase db, InventoryService 
         return row is null ? null : (await ToRowsAsync([row]))[0];
     }
 
+    public static readonly string[] ReasonCodes = ["damaged", "lost", "stocktake", "other"];
+
     public async Task<(AdminInventoryRow? Row, IResult? Error)> AdjustAsync(long adminId, long variantId, AdjustmentRequest r)
     {
         var errors = new Dictionary<string, string[]>();
-        if (r.Type is not ("increase" or "decrease")) errors["type"] = ["Type must be 'increase' or 'decrease'."];
+        if (r.Type == "increase")
+            errors["type"] = ["Stock can only be increased with a goods receipt (POST /api/admin/goods-receipts)."];
+        else if (r.Type is not (null or "" or "decrease"))
+            errors["type"] = ["Type must be 'decrease'."];
+        if (r.ReasonCode is null || !ReasonCodes.Contains(r.ReasonCode))
+            errors["reasonCode"] = [$"Reason code must be one of: {string.Join(", ", ReasonCodes)}."];
         if (r.Quantity is not (> 0 and <= 100_000)) errors["quantity"] = ["Quantity must be between 1 and 100000."];
         var reason = r.Reason?.Trim();
         if (reason is null || reason.Length is < 10 or > 300) errors["reason"] = ["Reason must be between 10 and 300 characters."];
         if (errors.Count > 0) return (null, Results.ValidationProblem(errors));
         if (!await inventory.Find(i => i.VariantId == variantId).AnyAsync()) return (null, Results.NotFound());
 
-        if (!await stock.AdjustAsync(variantId, r.Type == "increase", r.Quantity!.Value, reason!, adminId))
+        if (!await stock.AdjustAsync(variantId, false, r.Quantity!.Value, $"{r.ReasonCode}: {reason}", adminId))
         {
             return (null, Results.Conflict(new
             {
-                message = "On-hand stock cannot drop below the quantity already reserved by orders."
+                message = "You cannot remove more than the available stock; on-hand stock cannot drop below the quantity reserved by orders."
             }));
         }
 
@@ -126,7 +133,8 @@ internal sealed class AdminInventoryService(IMongoDatabase db, InventoryService 
             var available = Math.Max(0, onHand - reserved);
             return new AdminInventoryRow(v.VariantId, v.Sku, v.ProductId, ps.GetValueOrDefault(v.ProductId)?.Name,
                 ss.GetValueOrDefault(v.SizeId), cs.GetValueOrDefault(v.ColorId), v.Status == "inactive" ? "hidden" : v.Status ?? "active",
-                onHand, reserved, available, threshold, available <= threshold, r.UpdatedAt);
+                onHand, reserved, available, threshold, available <= threshold, r.UpdatedAt,
+                r.AverageCost, Math.Round(onHand * (r.AverageCost ?? 0), 0));
         }).ToArray();
     }
 }

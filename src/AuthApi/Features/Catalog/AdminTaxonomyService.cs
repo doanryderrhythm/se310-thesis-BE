@@ -157,9 +157,11 @@ internal sealed class AdminTaxonomyService(IMongoDatabase db, CounterService cou
 
     public async Task<AdminSizeResponse[]> ListSizesAsync()
     {
-        var list = await sizes.Find(Builders<SizeDocument>.Filter.Empty).SortBy(s => s.SizeId).ToListAsync();
+        var list = await sizes.Find(Builders<SizeDocument>.Filter.Empty).ToListAsync();
         var counts = await VariantCountsAsync("$size_id");
-        return list.Select(s => new AdminSizeResponse(s.SizeId, s.Name, s.Status ?? "active", counts.GetValueOrDefault(s.SizeId))).ToArray();
+        return list.OrderBy(s => s.DisplayOrder ?? (int)s.SizeId).ThenBy(s => s.SizeId)
+            .Select(s => new AdminSizeResponse(s.SizeId, s.Name, s.Status ?? "active", counts.GetValueOrDefault(s.SizeId),
+                s.DisplayOrder ?? (int)s.SizeId)).ToArray();
     }
 
     public async Task<(AdminSizeResponse? Size, IResult? Error)> CreateSizeAsync(SizeRequest r)
@@ -169,9 +171,15 @@ internal sealed class AdminTaxonomyService(IMongoDatabase db, CounterService cou
         if (name is null || name.Length is < 1 or > 20) return (null, Invalid("name", "Name must be between 1 and 20 characters."));
         if (status is not ("active" or "hidden")) return (null, Invalid("status", "Status must be 'active' or 'hidden'."));
         if (await SizeNameTakenAsync(name, null)) return (null, Invalid("name", "A size with this name already exists."));
-        var size = new SizeDocument { SizeId = await counters.NextAsync("sizes"), Name = name, Status = status };
+        if (r.DisplayOrder is < 0 or > 10_000) return (null, Invalid("displayOrder", "Display order must be between 0 and 10000."));
+        var highest = (await sizes.Find(Builders<SizeDocument>.Filter.Empty).ToListAsync())
+            .Select(x => x.DisplayOrder ?? (int)x.SizeId).DefaultIfEmpty(0).Max();
+        var size = new SizeDocument
+        {
+            SizeId = await counters.NextAsync("sizes"), Name = name, Status = status, DisplayOrder = r.DisplayOrder ?? highest + 1
+        };
         await sizes.InsertOneAsync(size);
-        return (new AdminSizeResponse(size.SizeId, name, status, 0), null);
+        return (new AdminSizeResponse(size.SizeId, name, status, 0, size.DisplayOrder!.Value), null);
     }
 
     public async Task<(AdminSizeResponse? Size, IResult? Error)> UpdateSizeAsync(long id, SizeRequest r)
@@ -192,10 +200,34 @@ internal sealed class AdminTaxonomyService(IMongoDatabase db, CounterService cou
             if (r.Status is not ("active" or "hidden")) return (null, Invalid("status", "Status must be 'active' or 'hidden'."));
             updates.Add(u.Set(s => s.Status, r.Status));
         }
+        if (r.DisplayOrder is { } order)
+        {
+            if (order is < 0 or > 10_000) return (null, Invalid("displayOrder", "Display order must be between 0 and 10000."));
+            updates.Add(u.Set(s => s.DisplayOrder, order));
+        }
         if (updates.Count > 0) await sizes.UpdateOneAsync(s => s.SizeId == id, u.Combine(updates));
         var after = await sizes.Find(s => s.SizeId == id).FirstAsync();
         return (new AdminSizeResponse(after.SizeId, after.Name, after.Status ?? "active",
-            await variants.CountDocumentsAsync(v => v.SizeId == id)), null);
+            await variants.CountDocumentsAsync(v => v.SizeId == id), after.DisplayOrder ?? (int)after.SizeId), null);
+    }
+
+    public async Task<IResult> DeleteSizeAsync(long id)
+    {
+        if (!await sizes.Find(s => s.SizeId == id).AnyAsync()) return Results.NotFound();
+        if (await variants.Find(v => v.SizeId == id).AnyAsync())
+            return Results.Conflict(new { message = "Variants still use this size; hide it instead." });
+        await sizes.DeleteOneAsync(s => s.SizeId == id);
+        return Results.NoContent();
+    }
+
+    public async Task<IResult> DeleteColorAsync(long id)
+    {
+        if (!await colors.Find(c => c.ColorId == id).AnyAsync()) return Results.NotFound();
+        if (await variants.Find(v => v.ColorId == id).AnyAsync()
+            || await db.GetCollection<ProductImageDocument>("product_images").Find(i => i.ColorId == id).AnyAsync())
+            return Results.Conflict(new { message = "Variants or images still use this color; hide it instead." });
+        await colors.DeleteOneAsync(c => c.ColorId == id);
+        return Results.NoContent();
     }
 
     private async Task<bool> SizeNameTakenAsync(string name, long? exceptId) =>
@@ -267,6 +299,10 @@ internal sealed class AdminTaxonomyService(IMongoDatabase db, CounterService cou
 
     // ---- Size charts ------------------------------------------------------------------------------
 
+    private static AdminSizeChartItemResponse ToItemResponse(SizeChartItemDocument i, int index) => new(
+        i.SizeChartItemId, i.SizeLabel, i.ChestCm, i.WaistCm, i.HipCm, i.LengthCm, i.Notes,
+        i.HeightMinCm, i.HeightMaxCm, i.WeightMinKg, i.WeightMaxKg, i.DisplayOrder ?? index);
+
     public async Task<AdminSizeChartResponse[]> ListChartsAsync(long? categoryId)
     {
         var filter = categoryId is { } c ? Builders<SizeChartDocument>.Filter.Eq(x => x.CategoryId, c) : Builders<SizeChartDocument>.Filter.Empty;
@@ -284,20 +320,25 @@ internal sealed class AdminTaxonomyService(IMongoDatabase db, CounterService cou
         return list.Select(x => new AdminSizeChartResponse(
             x.SizeChartId, x.Name, x.Description, x.CategoryId,
             x.CategoryId is { } cid ? names.GetValueOrDefault(cid) : null,
-            itemCounts.GetValueOrDefault(x.SizeChartId), productCounts.GetValueOrDefault(x.SizeChartId), x.CreatedAt, null)).ToArray();
+            itemCounts.GetValueOrDefault(x.SizeChartId), productCounts.GetValueOrDefault(x.SizeChartId), x.CreatedAt, null,
+            x.IsDefault == true)).ToArray();
     }
 
     public async Task<AdminSizeChartResponse?> GetChartAsync(long id)
     {
         var chart = await charts.Find(c => c.SizeChartId == id).FirstOrDefaultAsync();
         if (chart is null) return null;
-        var rows = await chartItems.Find(i => i.SizeChartId == id).SortBy(i => i.SizeChartItemId).ToListAsync();
+        var rows = (await chartItems.Find(i => i.SizeChartId == id).ToListAsync())
+            .OrderBy(i => i.DisplayOrder ?? int.MaxValue).ThenBy(i => i.SizeChartItemId).ToList();
         var category = chart.CategoryId is { } cid ? await categories.Find(c => c.CategoryId == cid).FirstOrDefaultAsync() : null;
         return new AdminSizeChartResponse(chart.SizeChartId, chart.Name, chart.Description, chart.CategoryId, category?.Name,
             rows.Count, await products.CountDocumentsAsync(p => p.SizeChartId == id), chart.CreatedAt,
-            rows.Select(i => new AdminSizeChartItemResponse(i.SizeChartItemId, i.SizeLabel, i.ChestCm, i.WaistCm,
-                i.HipCm, i.LengthCm, i.Notes)).ToArray());
+            rows.Select(ToItemResponse).ToArray(), chart.IsDefault == true);
     }
+
+    private static bool BadRange(double? min, double? max, double lowest, double highest) =>
+        min is < 0 || max is < 0 || min < lowest || max < lowest || min > highest || max > highest
+        || (min is not null && max is not null && min > max);
 
     public async Task<(AdminSizeChartResponse? Chart, IResult? Error)> SaveChartAsync(long? id, SizeChartRequest r)
     {
@@ -307,6 +348,8 @@ internal sealed class AdminTaxonomyService(IMongoDatabase db, CounterService cou
         if (r.Description is { Length: > 1000 }) errors["description"] = ["Description must be at most 1000 characters."];
         if (r.CategoryId is { } cid && !await categories.Find(c => c.CategoryId == cid).AnyAsync())
             errors["categoryId"] = ["Category does not exist."];
+        if (r.IsDefault == true && r.CategoryId is null)
+            errors["isDefault"] = ["A default size chart must belong to a category."];
         var rows = r.Items ?? [];
         if (rows.Length is 0 or > 30) errors["items"] = ["Provide between 1 and 30 size rows."];
         else
@@ -319,41 +362,85 @@ internal sealed class AdminTaxonomyService(IMongoDatabase db, CounterService cou
             else if (rows.Any(i => new[] { i.ChestCm, i.WaistCm, i.HipCm, i.LengthCm }.Any(v => v is < 0 or > 300)
                      || i.Notes is { Length: > 300 }))
                 errors["items"] = ["Measurements must be between 0 and 300 cm and notes at most 300 characters."];
+            else if (rows.Any(i => BadRange(i.HeightMinCm, i.HeightMaxCm, 50, 250)))
+                errors["items"] = ["Height range must be within 50-250 cm and min must not exceed max."];
+            else if (rows.Any(i => BadRange(i.WeightMinKg, i.WeightMaxKg, 10, 250)))
+                errors["items"] = ["Weight range must be within 10-250 kg and min must not exceed max."];
         }
         if (errors.Count > 0) return (null, Results.ValidationProblem(errors));
 
+        var description = string.IsNullOrWhiteSpace(r.Description) ? null : r.Description.Trim();
+        var now = DateTime.UtcNow;
         long chartId;
         if (id is { } existingId)
         {
             if (!await charts.Find(c => c.SizeChartId == existingId).AnyAsync()) return (null, Results.NotFound());
             chartId = existingId;
             await charts.UpdateOneAsync(c => c.SizeChartId == chartId, Builders<SizeChartDocument>.Update
-                .Set(c => c.Name, name).Set(c => c.Description, string.IsNullOrWhiteSpace(r.Description) ? null : r.Description.Trim())
-                .Set(c => c.CategoryId, r.CategoryId));
-            await chartItems.DeleteManyAsync(i => i.SizeChartId == chartId);
+                .Set(c => c.Name, name).Set(c => c.Description, description).Set(c => c.CategoryId, r.CategoryId)
+                .Set(c => c.IsDefault, r.IsDefault == true).Set(c => c.UpdatedAt, now));
         }
         else
         {
             chartId = await counters.NextAsync("size_charts");
             await charts.InsertOneAsync(new SizeChartDocument
             {
-                SizeChartId = chartId, Name = name,
-                Description = string.IsNullOrWhiteSpace(r.Description) ? null : r.Description.Trim(),
-                CategoryId = r.CategoryId, CreatedAt = DateTime.UtcNow
+                SizeChartId = chartId, Name = name, Description = description, CategoryId = r.CategoryId,
+                CreatedAt = now, UpdatedAt = now, IsDefault = r.IsDefault == true
             });
         }
 
-        foreach (var row in rows)
+        if (r.IsDefault == true)
         {
-            await chartItems.InsertOneAsync(new SizeChartItemDocument
-            {
-                SizeChartItemId = await counters.NextAsync("size_chart_items"), SizeChartId = chartId,
-                SizeLabel = row.SizeLabel!.Trim(), ChestCm = row.ChestCm, WaistCm = row.WaistCm, HipCm = row.HipCm,
-                LengthCm = row.LengthCm, Notes = string.IsNullOrWhiteSpace(row.Notes) ? null : row.Notes.Trim()
-            });
+            await charts.UpdateManyAsync(c => c.CategoryId == r.CategoryId && c.SizeChartId != chartId,
+                Builders<SizeChartDocument>.Update.Set(c => c.IsDefault, false));
         }
+
+        // Rows keep their id when the label stays (products and history may point at them); only
+        // removed labels are deleted and new labels inserted.
+        var existing = await chartItems.Find(i => i.SizeChartId == chartId).ToListAsync();
+        var byLabel = existing.ToDictionary(i => i.SizeLabel!.Trim().ToUpperInvariant());
+        var keep = new HashSet<long>();
+        foreach (var (row, index) in rows.Select((x, n) => (x, n)))
+        {
+            var label = row.SizeLabel!.Trim();
+            var notes = string.IsNullOrWhiteSpace(row.Notes) ? null : row.Notes.Trim();
+            if (byLabel.TryGetValue(label.ToUpperInvariant(), out var current))
+            {
+                keep.Add(current.SizeChartItemId);
+                await chartItems.UpdateOneAsync(i => i.SizeChartItemId == current.SizeChartItemId, Builders<SizeChartItemDocument>.Update
+                    .Set(i => i.SizeLabel, label).Set(i => i.ChestCm, row.ChestCm).Set(i => i.WaistCm, row.WaistCm)
+                    .Set(i => i.HipCm, row.HipCm).Set(i => i.LengthCm, row.LengthCm).Set(i => i.Notes, notes)
+                    .Set(i => i.HeightMinCm, row.HeightMinCm).Set(i => i.HeightMaxCm, row.HeightMaxCm)
+                    .Set(i => i.WeightMinKg, row.WeightMinKg).Set(i => i.WeightMaxKg, row.WeightMaxKg)
+                    .Set(i => i.DisplayOrder, row.DisplayOrder ?? index));
+            }
+            else
+            {
+                await chartItems.InsertOneAsync(new SizeChartItemDocument
+                {
+                    SizeChartItemId = await counters.NextAsync("size_chart_items"), SizeChartId = chartId,
+                    SizeLabel = label, ChestCm = row.ChestCm, WaistCm = row.WaistCm, HipCm = row.HipCm,
+                    LengthCm = row.LengthCm, Notes = notes, HeightMinCm = row.HeightMinCm, HeightMaxCm = row.HeightMaxCm,
+                    WeightMinKg = row.WeightMinKg, WeightMaxKg = row.WeightMaxKg, DisplayOrder = row.DisplayOrder ?? index
+                });
+            }
+        }
+
+        var removed = existing.Where(i => !keep.Contains(i.SizeChartItemId)).Select(i => i.SizeChartItemId).ToArray();
+        if (removed.Length > 0) await chartItems.DeleteManyAsync(Builders<SizeChartItemDocument>.Filter.In(i => i.SizeChartItemId, removed));
 
         return (await GetChartAsync(chartId), null);
+    }
+
+    public async Task<(AdminSizeChartResponse? Chart, IResult? Error)> DuplicateChartAsync(long id, DuplicateSizeChartRequest r)
+    {
+        var source = await GetChartAsync(id);
+        if (source is null) return (null, Results.NotFound());
+        var name = string.IsNullOrWhiteSpace(r.Name) ? $"{source.Name} (bản sao)" : r.Name.Trim();
+        return await SaveChartAsync(null, new SizeChartRequest(name, source.Description, source.CategoryId,
+            source.Items!.Select(i => new SizeChartItemInput(i.SizeLabel, i.ChestCm, i.WaistCm, i.HipCm, i.LengthCm, i.Notes,
+                i.HeightMinCm, i.HeightMaxCm, i.WeightMinKg, i.WeightMaxKg, i.DisplayOrder)).ToArray(), false));
     }
 
     public async Task<IResult> DeleteChartAsync(long id)

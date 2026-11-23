@@ -14,6 +14,7 @@ internal static class CatalogSetup
         var variants = db.GetCollection<ProductVariantDocument>("product_variants");
 
         await BackfillProductSlugsAsync(products);
+        await BackfillSearchTextAsync(products);
         // Categories created before display_order existed keep their id order.
         // Only rows that have no display_order at all; an admin-chosen 0 is kept.
         var missingOrder = Builders<CategoryDocument>.Filter.Exists("display_order", false);
@@ -55,6 +56,15 @@ internal static class CatalogSetup
         {
             await IdCounters.SyncAsync(db, counters, counter, collection, field);
         }
+    }
+
+    /// <summary>Products created before the public search existed get their accent-free search text.</summary>
+    private static async Task BackfillSearchTextAsync(IMongoCollection<ProductDocument> products)
+    {
+        var missing = await products.Find(Builders<ProductDocument>.Filter.Exists("search_text", false)).ToListAsync();
+        foreach (var product in missing)
+            await products.UpdateOneAsync(p => p.ProductId == product.ProductId,
+                Builders<ProductDocument>.Update.Set(p => p.SearchText, AdminProductService.SearchTextOf(product.Name, product.Description)));
     }
 
     private static async Task BackfillProductSlugsAsync(IMongoCollection<ProductDocument> products)

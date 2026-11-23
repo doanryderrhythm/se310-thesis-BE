@@ -21,6 +21,14 @@ internal sealed class CurrentUserService(IMongoCollection<User> users)
             return (null, Results.Unauthorized());
         }
 
+        // A password change ends every session that started before it (tokens carry their issue time).
+        if (user.PasswordChangedAt is { } changedAt
+            && long.TryParse(context.User.FindFirstValue("iat"), out var issuedAt)
+            && issuedAt < new DateTimeOffset(changedAt, TimeSpan.Zero).ToUnixTimeSeconds())
+        {
+            return (null, Results.Unauthorized());
+        }
+
         if (!context.User.IsInRole(requiredRole) || user.Role != requiredRole)
         {
             return (null, Results.Forbid());

@@ -64,7 +64,7 @@ internal static class AccountValidator
     private static readonly Regex EmailPattern = new(
         @"\A[^@\s]+@[^@\s]+\.[^@\s]+\z", RegexOptions.CultureInvariant | RegexOptions.Compiled);
 
-    private static bool IsValidPassword(string? password) =>
+    public static bool IsValidPassword(string? password) =>
         !string.IsNullOrEmpty(password)
         && password.Length >= 8
         && Encoding.UTF8.GetByteCount(password) <= 72;
