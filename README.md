@@ -417,7 +417,7 @@ can never overwrite a real user. Uploaded images are stored in the
 ## Frontend integration checklist
 
 > Chi tiết từng fetch (mô tả, API, response mẫu, lỗi, luồng, cách làm trong code FE) nằm trong
-> [`vantri-feat-voucher-admin-dashboard_TODO.md`](vantri-feat-voucher-admin-dashboard_TODO.md).
+> [`feat-voucher-admin-dashboard_TODO.md`](feat-voucher-admin-dashboard_TODO.md).
 
 Features the backend now exposes that still need UI work and API wiring in the
 frontend (`src/api.ts`, base `/api`, `Authorization: Bearer <accessToken>`).
