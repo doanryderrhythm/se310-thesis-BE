@@ -5,6 +5,7 @@ const schema = [
     fields: {
       user_id: "int", full_name: "string", email: "string", phone: "string",
       password_hash: "string", role: "string", status: "string",
+      status_reason: "string", status_changed_at: "date",
       created_at: "date", updated_at: "date"
     },
     required: ["user_id", "full_name", "phone", "password_hash"],
@@ -18,17 +19,39 @@ const schema = [
       address_id: "int", user_id: "int", recipient_name: "string",
       recipient_phone: "string", address_line: "string", ward: "string",
       district: "string", province: "string", is_default: "bool",
+      province_code: "int", district_code: "int", ward_code: "int",
       created_at: "date"
     },
     required: ["address_id", "user_id"],
     indexes: ["user_id"]
   },
   {
+    name: "provinces",
+    id: "province_code",
+    fields: { province_code: "int", name: "string" },
+    required: ["province_code", "name"],
+    indexes: []
+  },
+  {
+    name: "districts",
+    id: "district_code",
+    fields: { district_code: "int", province_code: "int", name: "string" },
+    required: ["district_code", "province_code", "name"],
+    indexes: ["province_code"]
+  },
+  {
+    name: "wards",
+    id: "ward_code",
+    fields: { ward_code: "int", district_code: "int", province_code: "int", name: "string" },
+    required: ["ward_code", "district_code", "province_code", "name"],
+    indexes: ["district_code"]
+  },
+  {
     name: "categories",
     id: "category_id",
     fields: {
       category_id: "int", name: "string", slug: "string",
-      description: "string", status: "string",
+      description: "string", status: "string", display_order: "int",
       created_at: "date", updated_at: "date"
     },
     required: ["category_id"],
@@ -76,7 +99,7 @@ const schema = [
     id: "product_id",
     fields: {
       product_id: "int", category_id: "int", size_chart_id: "int",
-      name: "string", description: "string", material: "string",
+      name: "string", slug: "string", description: "string", material: "string",
       base_price: "decimal", status: "string",
       created_at: "date", updated_at: "date"
     },
@@ -88,7 +111,7 @@ const schema = [
     id: "image_id",
     fields: {
       image_id: "int", product_id: "int", image_url: "string",
-      alt_text: "string"
+      alt_text: "string", color_id: "int", sort_order: "int"
     },
     required: ["image_id", "product_id"],
     indexes: ["product_id"]
@@ -101,7 +124,8 @@ const schema = [
       color_id: "int", sku: "string", price: "decimal", status: "string"
     },
     required: ["variant_id", "product_id", "size_id", "color_id"],
-    indexes: ["product_id", "size_id", "color_id"]
+    indexes: ["product_id", "size_id", "color_id"],
+    uniqueIndexes: ["sku"]
   },
   {
     name: "inventory",
@@ -138,12 +162,49 @@ const schema = [
     name: "coupons",
     id: "coupon_id",
     fields: {
-      coupon_id: "int", code: "string", discount_type: "string",
-      discount_value: "decimal", minimum_order_amount: "decimal",
+      coupon_id: "int", campaign_id: "int", code: "string", discount_type: "string",
+      discount_value: "decimal", max_discount_amount: "decimal",
+      minimum_order_amount: "decimal", applies_to: "string", category_ids: "array",
       starts_at: "date", expires_at: "date", usage_limit: "int",
-      usage_count: "int", status: "string", created_at: "date"
+      usage_count: "int", per_user_limit: "int", valid_days_after_issue: "int",
+      status: "string", created_at: "date", updated_at: "date"
     },
-    required: ["coupon_id"],
+    required: ["coupon_id", "campaign_id", "code"],
+    indexes: [],
+    uniqueIndexes: ["code", "campaign_id"]
+  },
+  {
+    name: "campaigns",
+    id: "campaign_id",
+    fields: {
+      campaign_id: "int", name: "string", description: "string",
+      trigger: "string", trigger_min_spent: "decimal",
+      distribution: "string", status: "string",
+      starts_at: "date", ends_at: "date", created_by: "int",
+      created_at: "date", updated_at: "date"
+    },
+    required: ["campaign_id", "name"],
+    indexes: []
+  },
+  {
+    name: "user_coupons",
+    id: "user_coupon_id",
+    fields: {
+      user_coupon_id: "int", coupon_id: "int", campaign_id: "int",
+      user_id: "int", status: "string", issued_at: "date",
+      expires_at: "date", used_order_id: "int", used_at: "date"
+    },
+    required: ["user_coupon_id", "coupon_id", "user_id"],
+    indexes: ["campaign_id"]
+  },
+  {
+    name: "notifications",
+    id: "notification_id",
+    fields: {
+      notification_id: "int", user_id: "int", type: "string",
+      title: "string", body: "string", read_at: "date", created_at: "date"
+    },
+    required: ["notification_id", "user_id"],
     indexes: []
   },
   {
@@ -156,20 +217,53 @@ const schema = [
       recipient_phone: "string", shipping_address_line: "string",
       shipping_ward: "string", shipping_district: "string",
       shipping_province: "string", shipping_postal_code: "string",
+      shipping_province_code: "int", shipping_district_code: "int",
+      shipping_ward_code: "int",
       subtotal: "decimal", discount_amount: "decimal",
       shipping_fee: "decimal", total_amount: "decimal",
       customer_note: "string", cancel_reason: "string",
-      placed_at: "date", updated_at: "date"
+      placed_at: "date", updated_at: "date",
+      delivered_at: "date", paid_at: "date", refunded_at: "date",
+      carrier: "string", tracking_code: "string", return_inspection: "string"
     },
     required: ["order_id"],
-    indexes: ["user_id", "coupon_id"]
+    indexes: ["user_id", "coupon_id"],
+    uniqueIndexes: ["order_code"]
+  },
+  {
+    name: "returns",
+    id: "return_id",
+    fields: {
+      return_id: "int", return_code: "string", order_id: "int",
+      order_code: "string", user_id: "int", status: "string",
+      reason: "string", description: "string",
+      estimated_refund: "decimal", refund_amount: "decimal",
+      refund_reference: "string", reject_reason: "string",
+      assignee_id: "int", requested_at: "date", updated_at: "date",
+      refunded_at: "date", items: "array", events: "array"
+    },
+    required: ["return_id", "return_code", "order_id", "user_id"],
+    indexes: ["order_id", "user_id"],
+    uniqueIndexes: ["return_code"]
+  },
+  {
+    name: "inventory_movements",
+    id: "movement_id",
+    fields: {
+      movement_id: "int", variant_id: "int", type: "string",
+      delta_on_hand: "int", delta_reserved: "int", on_hand_after: "int",
+      reserved_after: "int", reason: "string", ref_type: "string",
+      ref_id: "int", actor_id: "int", created_at: "date"
+    },
+    required: ["movement_id", "variant_id"],
+    indexes: []
   },
   {
     name: "order_items",
     id: "order_item_id",
     fields: {
       order_item_id: "int", order_id: "int", variant_id: "int",
-      product_name_snapshot: "string", sku_snapshot: "string",
+      product_id: "int", product_name_snapshot: "string", sku_snapshot: "string",
       size_snapshot: "string", color_snapshot: "string",
       quantity: "int", unit_price: "decimal", discount_amount: "decimal",
       line_total: "decimal"
@@ -192,8 +286,9 @@ const schema = [
     name: "coupon_usages",
     id: "coupon_usage_id",
     fields: {
-      coupon_usage_id: "int", coupon_id: "int", order_id: "int",
-      user_id: "int", discount_amount: "decimal", used_at: "date"
+      coupon_usage_id: "int", coupon_id: "int", user_coupon_id: "int",
+      order_id: "int", user_id: "int", discount_amount: "decimal",
+      used_at: "date", status: "string", released_at: "date"
     },
     required: ["coupon_usage_id", "coupon_id", "order_id"],
     indexes: ["coupon_id", "order_id", "user_id"]
@@ -216,7 +311,8 @@ const bsonTypes = {
   decimal: ["decimal", "double", "int", "long"],
   string: ["string"],
   date: ["date"],
-  bool: ["bool"]
+  bool: ["bool"],
+  array: ["array"]
 };
 
 for (const collection of schema) {

@@ -4,8 +4,16 @@ using System.Text;
 using System.Text.RegularExpressions;
 using AuthApi.Features.Admin;
 using AuthApi.Features.Carts;
+using AuthApi.Features.Catalog;
 using AuthApi.Features.Customers;
+using AuthApi.Features.Email;
+using AuthApi.Features.Inventory;
+using AuthApi.Features.Orders;
+using AuthApi.Features.Notifications;
 using AuthApi.Features.Products;
+using AuthApi.Features.Promotions;
+using AuthApi.Features.Reports;
+using AuthApi.Features.Returns;
 using AuthApi.Features.Reviews;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.IdentityModel.Tokens;
@@ -55,6 +63,8 @@ builder.Services
         };
     });
 builder.Services.AddAuthorization();
+builder.Services.AddSingleton<EmailQueue>();
+builder.Services.AddHostedService<EmailSenderWorker>();
 
 var app = builder.Build();
 
@@ -67,42 +77,49 @@ await InitializeAddressCounterAsync(deliveryAddresses, counters);
 app.UseAuthentication();
 app.UseAuthorization();
 
+var counterService = new AuthApi.Data.CounterService(counters);
+await NotificationService.SetupAsync(mongoDatabase, counterService);
+await PromotionSetup.SetupAsync(mongoDatabase, counterService);
+await InventoryService.SetupAsync(mongoDatabase, counterService);
+await AdminOrderService.SetupAsync(mongoDatabase, counterService);
+await CatalogSetup.SetupAsync(mongoDatabase, counterService);
+await ReturnService.SetupAsync(mongoDatabase, counterService);
+var notificationService = new NotificationService(mongoDatabase, counterService);
+var voucherIssuer = new VoucherIssuer(
+    mongoDatabase, counterService, notificationService, app.Services.GetRequiredService<EmailQueue>(), app.Logger);
+var accountService = new AuthApi.Features.Auth.AccountService(users, counters);
 app.MapPost("/api/auth/register", async (RegisterRequest request) =>
 {
-    var validationErrors = ValidateRegistration(request);
+    request = AuthApi.Features.Auth.AccountValidator.Normalize(request);
+    var validationErrors = AuthApi.Features.Auth.AccountValidator.ValidateRegistration(request);
     if (validationErrors.Count > 0)
     {
         return Results.ValidationProblem(validationErrors);
     }
 
-    var phone = request.Phone!;
-    var fullName = request.FullName!.Trim();
-    var password = request.Password!;
-
-    if (await users.Find(user => user.Phone == phone).AnyAsync())
+    if (await accountService.PhoneExistsAsync(request.Phone))
     {
         return Results.Conflict(new { message = "A user with this phone number already exists." });
     }
 
-    var user = new User
-    {
-        UserId = await NextUserIdAsync(counters),
-        FullName = fullName,
-        Phone = phone,
-        PasswordHash = BCrypt.Net.BCrypt.HashPassword(password, workFactor: 12),
-        Role = "customer",
-        Status = "active",
-        CreatedAt = DateTime.UtcNow,
-        UpdatedAt = DateTime.UtcNow
-    };
-
+    User user;
     try
     {
-        await users.InsertOneAsync(user);
+        user = await accountService.CreateAsync(request, "customer");
     }
     catch (MongoWriteException exception) when (exception.WriteError?.Code == 11000)
     {
         return Results.Conflict(new { message = "A user with this phone number already exists." });
+    }
+
+    // Welcome vouchers must never make a successful registration fail.
+    try
+    {
+        await voucherIssuer.IssueSignupVouchersAsync(user);
+    }
+    catch (Exception exception)
+    {
+        app.Logger.LogError(exception, "Issuing signup vouchers failed for user {UserId}.", user.UserId);
     }
 
     return Results.Ok(CreateAuthResponse(user, tokenKey));
@@ -110,6 +127,7 @@ app.MapPost("/api/auth/register", async (RegisterRequest request) =>
 
 app.MapPost("/api/auth/login", async (LoginRequest request) =>
 {
+    request = request with { Phone = AuthApi.Common.PhoneNumbers.Normalize(request.Phone) ?? request.Phone };
     var validationErrors = ValidateLogin(request);
     if (validationErrors.Count > 0)
     {
@@ -220,37 +238,33 @@ app.MapGet("/api/products/search", async (string? name, long? categoryId) =>
     return Results.Ok(response);
 });
 
-var counterService = new AuthApi.Data.CounterService(counters);
 await AuthApi.Features.Carts.CartService.SetupAsync(mongoDatabase, counterService);
 await AuthApi.Features.Reviews.ReviewEndpoints.SetupAsync(mongoDatabase, counterService);
 app.MapProductEndpoints(mongoDatabase);
 app.MapCartEndpoints(mongoDatabase, users, counterService);
 app.MapReviewEndpoints(mongoDatabase, users, counterService);
-app.MapCustomerEndpoints(users, deliveryAddresses, counters);
-app.MapAdminEndpoints(users, counters);
+app.MapAdminReviewEndpoints(mongoDatabase, users);
+var locationService = new AuthApi.Features.Locations.LocationService(mongoDatabase);
+app.MapCustomerEndpoints(users, deliveryAddresses, counters, locationService);
+AuthApi.Features.Locations.LocationEndpoints.MapLocationEndpoints(app, locationService);
+app.MapAdminEndpoints(mongoDatabase, users, counters);
+var catalogService = new ProductCatalogService(mongoDatabase);
+var couponService = new CouponService(mongoDatabase, counterService, catalogService);
+var inventoryService = new InventoryService(mongoDatabase, counterService);
+app.MapCampaignEndpoints(users, new CampaignService(mongoDatabase, counterService, voucherIssuer));
+app.MapCouponEndpoints(users, couponService);
+app.MapAdminCatalogEndpoints(users, new AdminTaxonomyService(mongoDatabase, counterService),
+    new AdminProductService(mongoDatabase, counterService, inventoryService));
+app.MapAdminInventoryEndpoints(users, new AdminInventoryService(mongoDatabase, inventoryService));
+app.MapMediaEndpoints(users, builder.Configuration["Uploads:Path"] ?? Path.Combine(app.Environment.ContentRootPath, "uploads"));
+app.MapReportEndpoints(users, new ReportService(mongoDatabase));
+app.MapReturnEndpoints(users, new ReturnService(
+    mongoDatabase, counterService, inventoryService, notificationService, app.Logger));
+app.MapAdminOrderEndpoints(users, new AdminOrderService(
+    mongoDatabase, counterService, inventoryService, couponService, voucherIssuer, notificationService, app.Logger));
+app.MapNotificationEndpoints(users, notificationService);
 
 app.Run();
-
-static Dictionary<string, string[]> ValidateRegistration(RegisterRequest request)
-{
-    var errors = new Dictionary<string, string[]>();
-    if (string.IsNullOrWhiteSpace(request.FullName) || request.FullName.Trim().Length > 100)
-    {
-        errors["fullName"] = ["Full name is required and must be at most 100 characters."];
-    }
-
-    if (!IsValidPhone(request.Phone))
-    {
-        errors["phone"] = ["Phone must contain exactly 10 digits."];
-    }
-
-    if (!IsValidPassword(request.Password))
-    {
-        errors["password"] = ["Password must be at least 8 characters and no more than 72 UTF-8 bytes."];
-    }
-
-    return errors;
-}
 
 static Dictionary<string, string[]> ValidateLogin(LoginRequest request)
 {
@@ -268,26 +282,8 @@ static Dictionary<string, string[]> ValidateLogin(LoginRequest request)
     return errors;
 }
 
-static bool IsValidPhone(string? phone) =>
-    phone is not null && Regex.IsMatch(phone, @"\A[0-9]{10}\z", RegexOptions.CultureInvariant);
-
-static bool IsValidPassword(string? password) =>
-    !string.IsNullOrEmpty(password)
-    && password.Length >= 8
-    && Encoding.UTF8.GetByteCount(password) <= 72;
-
-static async Task<long> NextUserIdAsync(IMongoCollection<Counter> counters)
-{
-    var counter = await counters.FindOneAndUpdateAsync(
-        item => item.Id == "users",
-        Builders<Counter>.Update.Inc(item => item.SequenceValue, 1),
-        new FindOneAndUpdateOptions<Counter>
-        {
-            IsUpsert = true,
-            ReturnDocument = ReturnDocument.After
-        });
-    return counter.SequenceValue;
-}
+// Lenient on purpose: accounts registered before the mobile-prefix rule must still log in.
+static bool IsValidPhone(string? phone) => AuthApi.Common.PhoneNumbers.IsTenDigits(phone);
 
 static async Task InitializeUserCounterAsync(
     IMongoCollection<User> users,
@@ -355,13 +351,13 @@ static AuthResponse CreateAuthResponse(User user, SymmetricSecurityKey tokenKey)
     return new AuthResponse(
         new JwtSecurityTokenHandler().WriteToken(token),
         expiresAt,
-        new UserResponse(user.UserId, user.FullName, user.Phone, user.Role));
+        new UserResponse(user.UserId, user.FullName, user.Phone, user.Role, user.Email));
 }
 
-internal sealed record RegisterRequest(string? FullName, string? Phone, string? Password);
+internal sealed record RegisterRequest(string? FullName, string? Phone, string? Password, string? Email = null);
 internal sealed record LoginRequest(string? Phone, string? Password);
 internal sealed record AuthResponse(string AccessToken, DateTime ExpiresAt, UserResponse User);
-internal sealed record UserResponse(long UserId, string FullName, string Phone, string Role);
+internal sealed record UserResponse(long UserId, string FullName, string Phone, string Role, string? Email = null);
 internal sealed record ProductResponse(
     long ProductId, long CategoryId, string? CategoryName, long? SizeChartId,
     string Name, string? Description, string? Material, double? BasePrice, string? Status,
@@ -374,6 +370,7 @@ internal sealed record ProductVariantResponse(
     double? Price, string? Status,
     int? QuantityOnHand, int? QuantityReserved);
 
+[BsonIgnoreExtraElements]
 internal sealed class User
 {
     [BsonId]
@@ -387,6 +384,10 @@ internal sealed class User
 
     [BsonElement("phone")]
     public string Phone { get; set; } = string.Empty;
+
+    [BsonElement("email")]
+    [BsonIgnoreIfNull]
+    public string? Email { get; set; }
 
     [BsonElement("password_hash")]
     public string PasswordHash { get; set; } = string.Empty;
@@ -402,8 +403,17 @@ internal sealed class User
 
     [BsonElement("updated_at")]
     public DateTime UpdatedAt { get; set; }
+
+    [BsonElement("status_reason")]
+    [BsonIgnoreIfNull]
+    public string? StatusReason { get; set; }
+
+    [BsonElement("status_changed_at")]
+    [BsonIgnoreIfNull]
+    public DateTime? StatusChangedAt { get; set; }
 }
 
+[BsonIgnoreExtraElements]
 internal sealed class DeliveryAddressDocument
 {
     [BsonId]
@@ -432,6 +442,15 @@ internal sealed class DeliveryAddressDocument
 
     [BsonElement("province")]
     public string? Province { get; set; }
+
+    [BsonElement("province_code")]
+    public int? ProvinceCode { get; set; }
+
+    [BsonElement("district_code")]
+    public int? DistrictCode { get; set; }
+
+    [BsonElement("ward_code")]
+    public int? WardCode { get; set; }
 
     [BsonElement("is_default")]
     public bool? IsDefault { get; set; }
@@ -475,6 +494,15 @@ internal sealed class ProductDocument
 
     [BsonElement("status")]
     public string? Status { get; set; }
+
+    [BsonElement("slug")]
+    public string? Slug { get; set; }
+
+    [BsonElement("created_at")]
+    public DateTime? CreatedAt { get; set; }
+
+    [BsonElement("updated_at")]
+    public DateTime? UpdatedAt { get; set; }
 }
 
 [BsonIgnoreExtraElements]
@@ -485,6 +513,24 @@ internal sealed class CategoryDocument
 
     [BsonElement("name")]
     public string Name { get; set; } = string.Empty;
+
+    [BsonElement("slug")]
+    public string? Slug { get; set; }
+
+    [BsonElement("description")]
+    public string? Description { get; set; }
+
+    [BsonElement("status")]
+    public string? Status { get; set; }
+
+    [BsonElement("display_order")]
+    public int? DisplayOrder { get; set; }
+
+    [BsonElement("created_at")]
+    public DateTime? CreatedAt { get; set; }
+
+    [BsonElement("updated_at")]
+    public DateTime? UpdatedAt { get; set; }
 }
 
 [BsonIgnoreExtraElements]
@@ -501,6 +547,12 @@ internal sealed class ProductImageDocument
 
     [BsonElement("alt_text")]
     public string? AltText { get; set; }
+
+    [BsonElement("color_id")]
+    public long? ColorId { get; set; }
+
+    [BsonElement("sort_order")]
+    public int? SortOrder { get; set; }
 }
 
 [BsonIgnoreExtraElements]
@@ -536,6 +588,9 @@ internal sealed class SizeDocument
 
     [BsonElement("name")]
     public string Name { get; set; } = string.Empty;
+
+    [BsonElement("status")]
+    public string? Status { get; set; }
 }
 
 [BsonIgnoreExtraElements]
@@ -549,13 +604,25 @@ internal sealed class ColorDocument
 
     [BsonElement("hex_code")]
     public string? HexCode { get; set; }
+
+    [BsonElement("status")]
+    public string? Status { get; set; }
 }
 
 [BsonIgnoreExtraElements]
 internal sealed class InventoryDocument
 {
+    [BsonElement("inventory_id")]
+    public long InventoryId { get; set; }
+
     [BsonElement("variant_id")]
     public long VariantId { get; set; }
+
+    [BsonElement("low_stock_threshold")]
+    public int? LowStockThreshold { get; set; }
+
+    [BsonElement("updated_at")]
+    public DateTime? UpdatedAt { get; set; }
 
     [BsonElement("quantity_on_hand")]
     public int? QuantityOnHand { get; set; }

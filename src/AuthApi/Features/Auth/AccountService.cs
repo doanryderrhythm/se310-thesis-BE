@@ -14,8 +14,9 @@ internal sealed class AccountService(IMongoCollection<User> users, IMongoCollect
         var user = new User
         {
             UserId = await NextUserIdAsync(),
-            FullName = request.FullName!.Trim(),
+            FullName = AuthApi.Common.Text.Clean(request.FullName)!,
             Phone = request.Phone!,
+            Email = AccountValidator.NormalizeEmail(request.Email, out _),
             PasswordHash = BCrypt.Net.BCrypt.HashPassword(request.Password!, workFactor: 12),
             Role = role,
             Status = "active",

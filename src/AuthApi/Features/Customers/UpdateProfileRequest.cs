@@ -1,3 +1,3 @@
 
 namespace AuthApi.Features.Customers;
-internal sealed record UpdateProfileRequest(string? FullName);
+internal sealed record UpdateProfileRequest(string? FullName, string? Email = null);

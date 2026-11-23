@@ -36,6 +36,7 @@ function upsert(collectionName, idField, document) {
 for (const category of categories) {
   upsert("categories", "category_id", {
     ...category,
+    display_order: category.category_id,
     status: "active",
     created_at: new Date("2026-10-02T03:00:00.000Z"),
     updated_at: new Date("2026-10-18T03:00:00.000Z")

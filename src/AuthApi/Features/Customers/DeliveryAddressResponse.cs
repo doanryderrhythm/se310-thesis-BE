@@ -9,4 +9,7 @@ internal sealed record DeliveryAddressResponse(
     string? District,
     string? Province,
     bool? IsDefault,
-    DateTime? CreatedAt);
+    DateTime? CreatedAt,
+    int? ProvinceCode = null,
+    int? DistrictCode = null,
+    int? WardCode = null);

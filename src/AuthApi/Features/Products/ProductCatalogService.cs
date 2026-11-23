@@ -10,6 +10,8 @@ internal sealed class SizeChartDocument
     [BsonElement("size_chart_id")] public long SizeChartId { get; set; }
     [BsonElement("name")] public string? Name { get; set; }
     [BsonElement("description")] public string? Description { get; set; }
+    [BsonElement("category_id")] public long? CategoryId { get; set; }
+    [BsonElement("created_at")] public DateTime? CreatedAt { get; set; }
 }
 
 [BsonIgnoreExtraElements]

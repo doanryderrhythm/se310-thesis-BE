@@ -18,6 +18,8 @@ internal sealed class ProductReviewDocument
     [BsonElement("comment")] public string? Comment { get; set; }
     [BsonElement("status")] public string Status { get; set; } = "published";
     [BsonElement("created_at")] public DateTime CreatedAt { get; set; }
+    [BsonElement("moderation_reason")] [BsonIgnoreIfNull] public string? ModerationReason { get; set; }
+    [BsonElement("moderated_at")] [BsonIgnoreIfNull] public DateTime? ModeratedAt { get; set; }
 }
 
 internal sealed record CreateReviewRequest(int? Rating, string? Comment);

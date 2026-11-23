@@ -10,7 +10,8 @@ internal static class CustomerEndpoints
         this IEndpointRouteBuilder app,
         IMongoCollection<User> users,
         IMongoCollection<DeliveryAddressDocument> deliveryAddresses,
-        IMongoCollection<Counter> counters)
+        IMongoCollection<Counter> counters,
+        AuthApi.Features.Locations.LocationService locations)
     {
         var currentUsers = new CurrentUserService(users);
         var customers = new CustomerService(users);
@@ -20,10 +21,10 @@ internal static class CustomerEndpoints
         Func<HttpContext, Task<IResult>> getMyDeliveryAddresses =
             context => GetMyDeliveryAddressesAsync(context, currentUsers, addresses);
         Func<HttpContext, CreateDeliveryAddressRequest, Task<IResult>> addMyDeliveryAddress =
-            (context, request) => AddMyDeliveryAddressAsync(context, request, currentUsers, addresses);
+            (context, request) => AddMyDeliveryAddressAsync(context, request, currentUsers, addresses, locations);
         Func<HttpContext, long, CreateDeliveryAddressRequest, Task<IResult>> updateMyDeliveryAddress =
             (context, addressId, request) =>
-                UpdateMyDeliveryAddressAsync(context, addressId, request, currentUsers, addresses);
+                UpdateMyDeliveryAddressAsync(context, addressId, request, currentUsers, addresses, locations);
         Func<HttpContext, long, Task<IResult>> deleteMyDeliveryAddress =
             (context, addressId) =>
                 DeleteMyDeliveryAddressAsync(context, addressId, currentUsers, addresses);
@@ -65,7 +66,8 @@ internal static class CustomerEndpoints
         long addressId,
         CreateDeliveryAddressRequest request,
         CurrentUserService currentUsers,
-        DeliveryAddressService addresses)
+        DeliveryAddressService addresses,
+        AuthApi.Features.Locations.LocationService locations)
     {
         var (user, error) = await currentUsers.ResolveAsync(context, UserRoles.Customer);
         if (error is not null)
@@ -81,13 +83,13 @@ internal static class CustomerEndpoints
             });
         }
 
-        var errors = ValidateDeliveryAddress(request);
-        if (errors.Count > 0)
+        var (normalized, errors) = await NormalizeAddressAsync(request, locations);
+        if (normalized is null)
         {
             return Results.ValidationProblem(errors);
         }
 
-        var address = await addresses.UpdateForUserAsync(user!.UserId, addressId, request);
+        var address = await addresses.UpdateForUserAsync(user!.UserId, addressId, normalized);
         return address is null ? Results.NotFound() : Results.Ok(address);
     }
 
@@ -95,7 +97,8 @@ internal static class CustomerEndpoints
         HttpContext context,
         CreateDeliveryAddressRequest request,
         CurrentUserService currentUsers,
-        DeliveryAddressService addresses)
+        DeliveryAddressService addresses,
+        AuthApi.Features.Locations.LocationService locations)
     {
         var (user, error) = await currentUsers.ResolveAsync(context, UserRoles.Customer);
         if (error is not null)
@@ -103,13 +106,13 @@ internal static class CustomerEndpoints
             return error;
         }
 
-        var errors = ValidateDeliveryAddress(request);
-        if (errors.Count > 0)
+        var (normalized, errors) = await NormalizeAddressAsync(request, locations);
+        if (normalized is null)
         {
             return Results.ValidationProblem(errors);
         }
 
-        var address = await addresses.CreateForUserAsync(user!.UserId, request);
+        var address = await addresses.CreateForUserAsync(user!.UserId, normalized);
         return Results.Created("/api/customers/me/addresses", address);
     }
 
@@ -127,37 +130,40 @@ internal static class CustomerEndpoints
         return Results.Ok(await addresses.GetForUserAsync(user!.UserId));
     }
 
-    private static Dictionary<string, string[]> ValidateDeliveryAddress(
-        CreateDeliveryAddressRequest request)
+    /// <summary>
+    /// Validates and normalizes an address: whitespace collapsed, phone in 0xxxxxxxxx form,
+    /// province/district/ward checked against the location catalog (codes or names).
+    /// </summary>
+    private static async Task<(NormalizedAddress? Address, Dictionary<string, string[]> Errors)> NormalizeAddressAsync(
+        CreateDeliveryAddressRequest request, AuthApi.Features.Locations.LocationService locations)
     {
         var errors = new Dictionary<string, string[]>();
-
-        AddRequiredFieldError(errors, "recipientName", "Recipient name", request.RecipientName, 100);
-        if (request.RecipientPhone is null
-            || !Regex.IsMatch(
-                request.RecipientPhone, @"\A[0-9]{10}\z", RegexOptions.CultureInvariant))
+        var name = AuthApi.Common.Text.Clean(request.RecipientName);
+        if (name is null || name.Length is < 2 or > 100)
         {
-            errors["recipientPhone"] = ["Recipient phone must contain exactly 10 digits."];
+            errors["recipientName"] = ["Recipient name is required (2-100 characters)."];
         }
 
-        AddRequiredFieldError(errors, "addressLine", "Address line", request.AddressLine, 255);
-        AddRequiredFieldError(errors, "ward", "Ward", request.Ward, 100);
-        AddRequiredFieldError(errors, "district", "District", request.District, 100);
-        AddRequiredFieldError(errors, "province", "Province", request.Province, 100);
-        return errors;
-    }
-
-    private static void AddRequiredFieldError(
-        Dictionary<string, string[]> errors,
-        string field,
-        string label,
-        string? value,
-        int maxLength)
-    {
-        if (string.IsNullOrWhiteSpace(value) || value.Trim().Length > maxLength)
+        var phone = AuthApi.Common.PhoneNumbers.Normalize(request.RecipientPhone);
+        if (!AuthApi.Common.PhoneNumbers.IsValidMobile(phone))
         {
-            errors[field] = [$"{label} is required and must be at most {maxLength} characters."];
+            errors["recipientPhone"] = [AuthApi.Common.PhoneNumbers.RuleMessage];
         }
+
+        var line = AuthApi.Common.Text.Clean(request.AddressLine);
+        if (line is null || line.Length is < 5 or > 255)
+        {
+            errors["addressLine"] = ["Address line (house number, street) is required (5-255 characters)."];
+        }
+
+        var (location, locationErrors) = await locations.ResolveAsync(
+            request.ProvinceCode, request.DistrictCode, request.WardCode,
+            request.Province, request.District, request.Ward);
+        foreach (var (key, value) in locationErrors) errors[key] = value;
+
+        return errors.Count > 0
+            ? (null, errors)
+            : (new NormalizedAddress(name!, phone!, line!, location!, request.IsDefault ?? false), errors);
     }
 
     private static async Task<IResult> GetMeAsync(
@@ -182,15 +188,32 @@ internal static class CustomerEndpoints
             return error;
         }
 
-        if (string.IsNullOrWhiteSpace(request.FullName) || request.FullName.Trim().Length > 100)
+        // Omitted (null) fields are left unchanged; an empty email clears the stored email.
+        var errors = new Dictionary<string, string[]>();
+        if (request.FullName is null && request.Email is null)
         {
-            return Results.ValidationProblem(new Dictionary<string, string[]>
-            {
-                ["fullName"] = ["Full name is required and must be at most 100 characters."]
-            });
+            errors["fullName"] = ["Provide fullName and/or email to update."];
         }
 
-        var updated = await customers.UpdateFullNameAsync(user!, request.FullName.Trim());
+        if (request.FullName is not null
+            && (string.IsNullOrWhiteSpace(request.FullName) || request.FullName.Trim().Length > 100))
+        {
+            errors["fullName"] = ["Full name is required and must be at most 100 characters."];
+        }
+
+        var clearEmail = request.Email is not null && string.IsNullOrWhiteSpace(request.Email);
+        var email = AuthApi.Features.Auth.AccountValidator.NormalizeEmail(request.Email, out var emailError);
+        if (emailError is not null)
+        {
+            errors["email"] = [emailError];
+        }
+
+        if (errors.Count > 0)
+        {
+            return Results.ValidationProblem(errors);
+        }
+
+        var updated = await customers.UpdateProfileAsync(user!, request.FullName?.Trim(), email, clearEmail);
         if (updated is null)
         {
             return Results.Unauthorized();
@@ -200,5 +223,5 @@ internal static class CustomerEndpoints
     }
 
     private static CustomerProfileResponse ToProfile(User user) =>
-        new(user.UserId, user.FullName, user.Phone, user.Role, user.CreatedAt, user.UpdatedAt);
+        new(user.UserId, user.FullName, user.Phone, user.Email, user.Role, user.CreatedAt, user.UpdatedAt);
 }
