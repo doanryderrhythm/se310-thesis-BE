@@ -42,6 +42,17 @@ internal static class CustomerOrderEndpoints
             return error ?? Results.Ok(await service.CountsAsync(user!.UserId));
         });
 
+        // Orders to show on "cancel / return" screens: not handed to the carrier yet, or delivered within the return window.
+        group.MapGet("/actionable", async (HttpContext c, string? action) =>
+        {
+            var (user, error) = await currentUsers.ResolveAsync(c, UserRoles.Customer);
+            if (error is not null) return error;
+            var filter = string.IsNullOrWhiteSpace(action) ? "all" : action.Trim().ToLowerInvariant();
+            if (!CustomerOrderService.ActionFilters.Contains(filter))
+                return Results.ValidationProblem(new Dictionary<string, string[]> { ["action"] = ["action must be all, cancel or return."] });
+            return Results.Ok(await service.ActionableAsync(user!.UserId, filter));
+        });
+
         group.MapGet("/{orderCode}", async (HttpContext c, string orderCode) =>
         {
             var (user, error) = await currentUsers.ResolveAsync(c, UserRoles.Customer);

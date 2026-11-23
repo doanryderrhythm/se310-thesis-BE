@@ -28,6 +28,7 @@ internal sealed class CustomerOrderService(IMongoDatabase db, AdminOrderService 
     private readonly IMongoCollection<ProductImageDocument> images = db.GetCollection<ProductImageDocument>("product_images");
     private readonly IMongoCollection<ProductDocument> products = db.GetCollection<ProductDocument>("products");
     private readonly IMongoCollection<ProductReviewDocument> reviews = db.GetCollection<ProductReviewDocument>("product_reviews");
+    private readonly IMongoCollection<CustomerReturnDocument> returns = db.GetCollection<CustomerReturnDocument>("returns");
     private readonly IMongoCollection<BsonDocument> coupons = db.GetCollection<BsonDocument>("coupons");
 
     public static bool IsStatusFilter(string? value) =>
@@ -70,6 +71,54 @@ internal sealed class CustomerOrderService(IMongoDatabase db, AdminOrderService 
                 own.Take(3).Select(i => new CustomerOrderPreviewItem(i.ProductNameSnapshot, ImageOf(i, imageByProduct),
                     i.SizeSnapshot, i.ColorSnapshot, i.Quantity)).ToArray(), CanCancel(o));
         }).ToArray(), page, pageSize, total);
+    }
+
+    public static readonly string[] ActionFilters = ["all", "cancel", "return"];
+
+    /// <summary>
+    /// Orders the customer can still cancel (pending or confirmed: not handed to the carrier) and orders they can
+    /// return goods from (delivered, inside the return window, with something left to return).
+    /// </summary>
+    public async Task<ActionableOrdersResponse> ActionableAsync(long userId, string action)
+    {
+        var now = DateTime.UtcNow;
+        var windowStart = now.AddDays(-ReturnService.ReturnWindowDays);
+        var b = Builders<OrderDocument>.Filter;
+        var cancellable = b.In(o => o.Status, CustomerCancelStatuses);
+        var deliveredInWindow = b.Eq(o => o.Status, OrderStatuses.Delivered) & b.Gte(o => o.DeliveredAt, windowStart);
+        var filter = b.Eq(o => o.UserId, userId) & action switch
+        {
+            "cancel" => cancellable,
+            "return" => deliveredInWindow,
+            _ => cancellable | deliveredInWindow
+        };
+        var list = await orders.Find(filter).SortByDescending(o => o.PlacedAt).ThenByDescending(o => o.OrderId).ToListAsync();
+
+        var deliveredIds = list.Where(o => o.Status == OrderStatuses.Delivered).Select(o => o.OrderId).ToArray();
+        var lines = (await items.Find(Builders<OrderItemDocument>.Filter.In(i => i.OrderId, list.Select(o => o.OrderId))).ToListAsync())
+            .OrderBy(i => i.OrderItemId).GroupBy(i => i.OrderId).ToDictionary(g => g.Key, g => g.ToList());
+        var returnedByItem = (await returns.Find(r => deliveredIds.Contains(r.OrderId) && r.Status != ReturnStatuses.Rejected).ToListAsync())
+            .SelectMany(r => r.Items).GroupBy(i => i.OrderItemId).ToDictionary(g => g.Key, g => g.Sum(i => i.Quantity));
+        var imageByProduct = await PrimaryImagesAsync(lines.Values.SelectMany(l => l));
+
+        var result = new List<ActionableOrder>();
+        foreach (var o in list)
+        {
+            var own = lines.GetValueOrDefault(o.OrderId, []);
+            var canCancel = CanCancel(o);
+            var remaining = o.Status == OrderStatuses.Delivered
+                ? own.Sum(i => Math.Max(0, i.Quantity - returnedByItem.GetValueOrDefault(i.OrderItemId))) : 0;
+            var canReturn = remaining > 0;
+            if (!canCancel && !canReturn) continue; // delivered but everything is already being returned
+            result.Add(new ActionableOrder(o.OrderId, o.OrderCode, o.Status, o.PlacedAt, o.DeliveredAt, o.TotalAmount,
+                o.PaymentMethod, o.PaymentStatus, own.Sum(i => i.Quantity),
+                own.Take(3).Select(i => new CustomerOrderPreviewItem(i.ProductNameSnapshot, ImageOf(i, imageByProduct),
+                    i.SizeSnapshot, i.ColorSnapshot, i.Quantity)).ToArray(),
+                canCancel, canReturn, canReturn ? o.DeliveredAt?.AddDays(ReturnService.ReturnWindowDays) : null, remaining));
+        }
+
+        return new ActionableOrdersResponse([.. result], result.Count(x => x.CanCancel), result.Count(x => x.CanReturn),
+            ReturnService.ReturnWindowDays);
     }
 
     public async Task<CustomerOrderCounts> CountsAsync(long userId)

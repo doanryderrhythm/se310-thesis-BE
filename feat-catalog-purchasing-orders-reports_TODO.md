@@ -64,7 +64,7 @@ Cấu hình hiển thị tài khoản chuyển khoản/tên cửa hàng: biến 
 
 **Phần A — Khách**
 - ☐ A1 Menu danh mục động · ☐ A2 Danh sách SP + bộ lọc đầy đủ · ☐ A3 Chi tiết SP + gợi ý size · ☐ A4 Giỏ hàng (tick, số lượng, gộp giỏ)
-- ☐ A5 Đơn của tôi (danh sách, chi tiết, hủy, chuyển khoản) · ☐ A6 Đánh giá gắn đơn đã giao · ☐ A7 Đổi mật khẩu · ☐ A8 CSS ảnh theo chuẩn
+- ☐ A5 Đơn của tôi (danh sách, chi tiết, hủy, chuyển khoản) · ☐ A5b Màn "Hủy / Trả hàng" (đơn có thể hủy hoặc trả) · ☐ A6 Đánh giá gắn đơn đã giao · ☐ A7 Đổi mật khẩu · ☐ A8 CSS ảnh theo chuẩn
 
 **Phần B — Admin (mới hoàn toàn)**
 - ☐ B1 Khung admin + đăng nhập · ☐ B2 Chất liệu & Công dụng · ☐ B3 Sản phẩm (danh sách + form) · ☐ B4 Ảnh sản phẩm (upload chuẩn)
@@ -119,6 +119,21 @@ Cấu hình hiển thị tài khoản chuyển khoản/tên cửa hàng: biến 
   - Nút: "Hủy đơn" khi `canCancel` (modal lý do 10–300 ký tự); "Trả hàng" khi `canReturn` (hiện hạn `returnDeadline`) → luồng trả hàng cũ; "Viết đánh giá" cho item `reviewable`.
 - **Lỗi**: hủy khi đơn đã sang đóng gói → `409 {message}` → hiện message và tải lại đơn. Đơn của người khác → `404`.
 - **Nghiệm thu**: hủy xong tab "Đã hủy" tăng, "Chờ xử lý" giảm; số lượng trong kho admin được trả; thông báo trong chuông có "đơn … đã bị hủy".
+
+## A5b. Màn "Hủy / Trả hàng" — đơn có thể hủy hoặc hoàn ☐ (thêm `src/features/orders/ReturnOrCancel.tsx`, route `/account/orders/actions`; chọn lọc ở `/account/returns/new` và `Returns.tsx`)
+
+- **API**: `GET /api/customers/me/orders/actionable?action=all|cancel|return` (không phân trang, mới nhất trước).
+  - `cancel` = đơn **chưa bàn giao vận chuyển** (`pending`, `confirmed`) → có `canCancel: true`.
+  - `return` = đơn **đã giao** trong 7 ngày và còn sản phẩm chưa trả → `canReturn: true`, kèm `returnDeadline` và `returnableQuantity` (số SP còn trả được; yêu cầu trả bị từ chối thì SP được trả lại vào số này; trả hết thì đơn tự rời danh sách).
+  - Đơn đang đóng gói / đang giao / giao thất bại / đã hủy / quá 7 ngày **không** có trong danh sách.
+- **Response**: `{ items: [{ orderId, orderCode, status, placedAt, deliveredAt, totalAmount, paymentMethod, paymentStatus, itemCount, preview: [{productName, imageUrl, size, color, quantity}], canCancel, canReturn, returnDeadline, returnableQuantity }], cancellableCount, returnableCount, returnWindowDays }`.
+- **Luồng / giao diện**: trang có hai tab "Có thể hủy (N)" và "Có thể trả hàng (N)" lấy `cancellableCount`/`returnableCount` (tải một lần với `action=all`, lọc theo `canCancel`/`canReturn` ở FE; hoặc gọi lại với `action=` tương ứng). Mỗi thẻ đơn: mã, ngày đặt (tab trả: ngày giao), tối đa 3 ảnh từ `preview` + "+N", tổng tiền.
+  - Tab hủy: nút **Hủy đơn** → modal lý do 10–300 ký tự → `POST /api/customers/me/orders/{orderCode}/cancel` (A5); xong bỏ thẻ khỏi danh sách và tăng tab "Đã hủy".
+  - Tab trả: dòng "Còn **X ngày** để trả hàng" tính từ `returnDeadline` (≤ 2 ngày hiện màu cảnh báo), "Còn trả được **N** sản phẩm"; nút **Trả hàng** → `/account/returns/new?order=<orderCode>` (form chọn SP lấy `GET …/orders/{orderCode}/returnable-items`).
+  - Trạng thái rỗng: "Bạn không có đơn nào có thể hủy" / "…có thể trả hàng (đơn đã giao được trả trong 7 ngày)" + nút "Xem tất cả đơn hàng".
+  - Có thể dùng làm nguồn cho nút "Hủy/Trả hàng" ở menu tài khoản kèm huy hiệu số (`cancellableCount + returnableCount`).
+- **Lỗi**: `400 action` (giá trị khác `all|cancel|return`); danh sách là ảnh chụp tại lúc tải — bấm hủy khi đơn vừa sang đóng gói → `409 {message}` → hiện message và tải lại danh sách.
+- **Nghiệm thu**: đơn pending/confirmed chỉ ở tab hủy; đơn giao 2 ngày trước chỉ ở tab trả; đơn đóng gói/giao thất bại/hủy/giao 10 ngày trước không xuất hiện; trả một phần → đơn vẫn còn với số lượng giảm; trả hết → biến mất; admin từ chối yêu cầu trả → đơn quay lại.
 
 ## A6. Đánh giá gắn đơn đã giao ☐ (nối `Reviews.tsx`, form ở chi tiết SP)
 
@@ -347,6 +362,10 @@ export type MergeResult = { cart: Cart; results: { variantId: number; requested:
 export type MyOrderListItem = { orderId: number; orderCode: string; status: string; placedAt: string; totalAmount: number
   paymentMethod: string | null; paymentStatus: string | null; itemCount: number; canCancel: boolean
   preview: { productName: string | null; imageUrl: string | null; size: string | null; color: string | null; quantity: number }[] }
+export type ActionableOrder = { orderId: number; orderCode: string; status: string; placedAt: string; deliveredAt: string | null
+  totalAmount: number; paymentMethod: string | null; paymentStatus: string | null; itemCount: number
+  preview: MyOrderListItem['preview']; canCancel: boolean; canReturn: boolean; returnDeadline: string | null; returnableQuantity: number }
+export type ActionableOrders = { items: ActionableOrder[]; cancellableCount: number; returnableCount: number; returnWindowDays: number }
 export type MyOrderCounts = { all: number; active: number; shipping: number; delivered: number; cancelled: number
   deliveryFailed: number; byStatus: Record<string, number> }
 export type ReportPoint = { period: string; label: string; start: string; end: string; orderCount: number; deliveredCount: number

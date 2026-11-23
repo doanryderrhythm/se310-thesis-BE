@@ -32,3 +32,12 @@ internal sealed record CustomerOrderCounts(
     Dictionary<string, long> ByStatus);
 
 internal sealed record CancelOrderRequest(string? Reason);
+
+/// <summary>An order the customer can still act on: cancel it (not handed to the carrier yet) or return goods (delivered, inside the window).</summary>
+internal sealed record ActionableOrder(
+    long OrderId, string OrderCode, string Status, DateTime PlacedAt, DateTime? DeliveredAt, double TotalAmount,
+    string? PaymentMethod, string? PaymentStatus, int ItemCount, CustomerOrderPreviewItem[] Preview,
+    bool CanCancel, bool CanReturn, DateTime? ReturnDeadline, int ReturnableQuantity);
+
+internal sealed record ActionableOrdersResponse(
+    ActionableOrder[] Items, long CancellableCount, long ReturnableCount, int ReturnWindowDays);
