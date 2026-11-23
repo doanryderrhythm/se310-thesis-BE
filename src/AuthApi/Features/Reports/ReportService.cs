@@ -33,11 +33,15 @@ internal sealed class ReportService(IMongoDatabase db)
         ["refundAmount"] = "Tổng tiền đã hoàn cho các yêu cầu trả hàng có ngày hoàn nằm trong khoảng. Hoàn tiền đơn bị hủy hoặc hoàn về shop không trừ vì các đơn đó không tính vào doanh thu.",
         ["netRevenue"] = "Doanh thu thuần = doanh thu gộp − tiền hoàn.",
         ["unitsSold"] = "Tổng số sản phẩm trong các đơn đã giao trong khoảng.",
+        ["merchandiseRevenue"] = "Tiền hàng sau giảm giá (không gồm phí vận chuyển) của các đơn đã giao trong khoảng.",
+        ["shippingRevenue"] = "Tổng phí vận chuyển thu từ các đơn đã giao trong khoảng.",
+        ["discountAmount"] = "Tổng giảm giá (voucher) của các đơn đã giao trong khoảng.",
+        ["averageOrderValue"] = "Doanh thu gộp chia số đơn đã giao.",
+        ["cancelledCount"] = "Số đơn đặt trong khoảng và hiện đang ở trạng thái đã hủy.",
+        ["comparison"] = "So với kỳ liền trước có cùng số ngày; phần trăm thay đổi để trống khi kỳ trước bằng 0.",
         ["lowStock"] = "Biến thể đang bán có số khả dụng (tồn − đang giữ) nhỏ hơn hoặc bằng ngưỡng cảnh báo.",
-        ["timezone"] = "Ngày được tính theo giờ Việt Nam (UTC+7); tuần bắt đầu từ thứ Hai."
+        ["timezone"] = "Ngày được tính theo giờ Việt Nam (UTC+7); tuần theo chuẩn ISO (bắt đầu từ thứ Hai). Nhóm đầu và cuối của khoảng chọn có thể chỉ tính một phần kỳ."
     };
-
-    public const int MaxDays = 366;
 
     public static ReportRange ToRange(DateOnly from, DateOnly to) =>
         new(from.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture), to.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture),
@@ -45,17 +49,34 @@ internal sealed class ReportService(IMongoDatabase db)
 
     // ---- Report ---------------------------------------------------------------------------------
 
-    public async Task<ReportResponse> ReportAsync(DateOnly from, DateOnly to, bool weekly)
+    public async Task<ReportResponse> ReportAsync(DateOnly from, DateOnly to, string groupBy)
     {
-        var (kpis, series, topIds) = await ComputeAsync(from, to, weekly);
+        var (kpis, series, topIds) = await ComputeAsync(from, to, groupBy);
         var topProducts = await TopProductsAsync(topIds, 10);
-        return new ReportResponse(ToRange(from, to), weekly ? "week" : "day", kpis, series, topProducts,
+
+        var days = to.DayNumber - from.DayNumber + 1;
+        var prevTo = from.AddDays(-1);
+        var prevFrom = from.AddDays(-days);
+        var (prev, _, _) = await ComputeAsync(prevFrom, prevTo, groupBy);
+        var comparison = new ReportComparison(ToRange(prevFrom, prevTo), prev, new Dictionary<string, double?>
+        {
+            ["orderCount"] = Change(kpis.OrderCount, prev.OrderCount),
+            ["deliveredCount"] = Change(kpis.DeliveredCount, prev.DeliveredCount),
+            ["grossRevenue"] = Change(kpis.GrossRevenue, prev.GrossRevenue),
+            ["netRevenue"] = Change(kpis.NetRevenue, prev.NetRevenue),
+            ["unitsSold"] = Change(kpis.UnitsSold, prev.UnitsSold),
+            ["averageOrderValue"] = Change(kpis.AverageOrderValue, prev.AverageOrderValue)
+        });
+        return new ReportResponse(ToRange(from, to), groupBy, kpis, comparison, series, topProducts,
             (await LowStockAsync(20)).Rows, Definitions);
     }
 
-    public async Task<DashboardResponse> DashboardAsync(DateOnly from, DateOnly to)
+    private static double? Change(double current, double previous) =>
+        previous == 0 ? null : Math.Round((current - previous) / previous * 100, 1);
+
+    public async Task<DashboardResponse> DashboardAsync(DateOnly from, DateOnly to, string groupBy)
     {
-        var (kpis, series, _) = await ComputeAsync(from, to, false);
+        var (kpis, series, _) = await ComputeAsync(from, to, groupBy);
         var lowStock = await LowStockAsync(5);
         var byStatus = (await orders.Aggregate()
             .Group<BsonDocument>(new BsonDocument { { "_id", "$status" }, { "n", new BsonDocument("$sum", 1) } }).ToListAsync())
@@ -64,7 +85,7 @@ internal sealed class ReportService(IMongoDatabase db)
         var recent = await orders.Find(Builders<OrderDocument>.Filter.Empty).SortByDescending(o => o.PlacedAt).Limit(5).ToListAsync();
         var names = (await users.Find(Builders<User>.Filter.In(u => u.UserId, recent.Where(o => o.UserId is not null).Select(o => o.UserId!.Value)))
             .ToListAsync()).ToDictionary(u => u.UserId, u => u.FullName);
-        return new DashboardResponse(ToRange(from, to), kpis,
+        return new DashboardResponse(ToRange(from, to), groupBy, kpis,
             new DashboardCounters(Count(OrderStatuses.Pending) + Count(OrderStatuses.Confirmed) + Count(OrderStatuses.Packing),
                 Count(OrderStatuses.Pending), await returns.CountDocumentsAsync(r => r.Status == ReturnStatuses.Requested), lowStock.Total),
             series,
@@ -73,30 +94,47 @@ internal sealed class ReportService(IMongoDatabase db)
             lowStock.Rows, Definitions);
     }
 
-    /// <summary>CSV of the same daily/weekly series shown on the report screen (UTF-8 with BOM for Excel).</summary>
-    public async Task<byte[]> ExportCsvAsync(DateOnly from, DateOnly to, bool weekly)
+    /// <summary>CSV of the same series shown on the report screen (UTF-8 with BOM for Excel).</summary>
+    public async Task<byte[]> ExportCsvAsync(DateOnly from, DateOnly to, string groupBy)
     {
-        var (kpis, series, _) = await ComputeAsync(from, to, weekly);
-        var text = new StringBuilder("period,orders,delivered_orders,gross_revenue,refund_amount,net_revenue,units_sold\r\n");
+        var (kpis, series, _) = await ComputeAsync(from, to, groupBy);
+        var text = new StringBuilder(
+            "period,label,start,end,orders,delivered_orders,cancelled_orders,gross_revenue,merchandise_revenue,shipping_revenue,discount_amount,refund_amount,net_revenue,units_sold,average_order_value\r\n");
         foreach (var p in series)
-            text.Append(string.Join(',', p.Period, p.OrderCount, p.DeliveredCount, Money(p.GrossRevenue), Money(p.RefundAmount), Money(p.NetRevenue), p.UnitsSold)).Append("\r\n");
-        text.Append(string.Join(',', "TOTAL", kpis.OrderCount, kpis.DeliveredCount, Money(kpis.GrossRevenue), Money(kpis.RefundAmount), Money(kpis.NetRevenue), kpis.UnitsSold)).Append("\r\n");
+        {
+            text.Append(string.Join(',', p.Period, Csv(p.Label), p.Start, p.End, p.OrderCount, p.DeliveredCount, p.CancelledCount,
+                Money(p.GrossRevenue), Money(p.MerchandiseRevenue), Money(p.ShippingRevenue), Money(p.DiscountAmount),
+                Money(p.RefundAmount), Money(p.NetRevenue), p.UnitsSold, Money(p.AverageOrderValue))).Append("\r\n");
+        }
+        text.Append(string.Join(',', "TOTAL", "", from.ToString("yyyy-MM-dd"), to.ToString("yyyy-MM-dd"), kpis.OrderCount,
+            kpis.DeliveredCount, kpis.CancelledCount, Money(kpis.GrossRevenue), Money(kpis.MerchandiseRevenue),
+            Money(kpis.ShippingRevenue), Money(kpis.DiscountAmount), Money(kpis.RefundAmount), Money(kpis.NetRevenue),
+            kpis.UnitsSold, Money(kpis.AverageOrderValue))).Append("\r\n");
         return [.. Encoding.UTF8.GetPreamble(), .. Encoding.UTF8.GetBytes(text.ToString())];
     }
+
+    private static string Csv(string value) => value.Contains(',') || value.Contains('"') ? $"\"{value.Replace("\"", "\"\"")}\"" : value;
 
     private static string Money(double value) => value.ToString("0.##", CultureInfo.InvariantCulture);
 
     // ---- Core computation ----------------------------------------------------------------------------
 
+    private sealed class Bucket
+    {
+        public int Orders, Delivered, Units, Cancelled;
+        public double Gross, Refund, Merchandise, Shipping, Discount;
+    }
+
     private async Task<(ReportKpis Kpis, ReportPoint[] Series, List<long> DeliveredOrderIds)> ComputeAsync(
-        DateOnly from, DateOnly to, bool weekly)
+        DateOnly from, DateOnly to, string groupBy)
     {
         var fromUtc = VnTime.StartOfDayUtc(from);
         var toUtc = VnTime.StartOfDayUtc(to.AddDays(1));
 
-        var placed = await orders.Find(o => o.PlacedAt >= fromUtc && o.PlacedAt < toUtc).Project(o => o.PlacedAt).ToListAsync();
+        var placed = await orders.Find(o => o.PlacedAt >= fromUtc && o.PlacedAt < toUtc)
+            .Project(o => new { o.PlacedAt, o.Status }).ToListAsync();
         var delivered = await orders.Find(o => o.Status == OrderStatuses.Delivered && o.DeliveredAt >= fromUtc && o.DeliveredAt < toUtc)
-            .Project(o => new { o.OrderId, o.DeliveredAt, o.TotalAmount }).ToListAsync();
+            .Project(o => new { o.OrderId, o.DeliveredAt, o.TotalAmount, o.Subtotal, o.DiscountAmount, o.ShippingFee }).ToListAsync();
         var deliveredIds = delivered.Select(o => o.OrderId).ToList();
         var unitsByOrder = (await orderItems.Aggregate()
             .Match(Builders<OrderItemDocument>.Filter.In(i => i.OrderId, deliveredIds))
@@ -105,29 +143,50 @@ internal sealed class ReportService(IMongoDatabase db)
         var refunds = await returns.Find(r => r.Status == ReturnStatuses.Refunded && r.RefundedAt >= fromUtc && r.RefundedAt < toUtc)
             .Project(r => new { r.RefundedAt, r.RefundAmount }).ToListAsync();
 
-        var points = new Dictionary<string, (int Orders, int Delivered, double Gross, double Refund, int Units)>();
+        // Pre-fill every bucket so periods without sales still show up as zeros.
+        var points = new SortedDictionary<DateOnly, (VnTime.Period Period, Bucket Data)>();
+        var byKey = new Dictionary<string, Bucket>();
         for (var day = from; day <= to; day = day.AddDays(1))
         {
-            var key = VnTime.Key(VnTime.StartOfDayUtc(day), weekly);
-            points.TryAdd(key, (0, 0, 0, 0, 0));
+            var period = VnTime.PeriodOf(day, groupBy);
+            if (byKey.ContainsKey(period.Key)) continue;
+            var data = new Bucket();
+            byKey[period.Key] = data;
+            points[period.Start] = (period, data);
         }
 
-        void Add(string key, int orders_ = 0, int delivered_ = 0, double gross = 0, double refund = 0, int units = 0)
+        Bucket At(DateTime utc) => byKey[VnTime.PeriodOf(utc, groupBy).Key];
+        foreach (var o in placed)
         {
-            var p = points[key];
-            points[key] = (p.Orders + orders_, p.Delivered + delivered_, p.Gross + gross, p.Refund + refund, p.Units + units);
+            var bucket = At(o.PlacedAt);
+            bucket.Orders++;
+            if (o.Status == OrderStatuses.Cancelled) bucket.Cancelled++;
         }
-
-        foreach (var at in placed) Add(VnTime.Key(at, weekly), orders_: 1);
         foreach (var o in delivered)
-            Add(VnTime.Key(o.DeliveredAt!.Value, weekly), delivered_: 1, gross: o.TotalAmount, units: unitsByOrder.GetValueOrDefault(o.OrderId));
-        foreach (var r in refunds) Add(VnTime.Key(r.RefundedAt!.Value, weekly), refund: r.RefundAmount ?? 0);
+        {
+            var bucket = At(o.DeliveredAt!.Value);
+            bucket.Delivered++;
+            bucket.Gross += o.TotalAmount;
+            bucket.Merchandise += o.Subtotal - o.DiscountAmount;
+            bucket.Shipping += o.ShippingFee;
+            bucket.Discount += o.DiscountAmount;
+            bucket.Units += unitsByOrder.GetValueOrDefault(o.OrderId);
+        }
+        foreach (var r in refunds) At(r.RefundedAt!.Value).Refund += r.RefundAmount ?? 0;
 
-        var series = points.OrderBy(p => p.Key, StringComparer.Ordinal)
-            .Select(p => new ReportPoint(p.Key, p.Value.Orders, p.Value.Delivered, p.Value.Gross, p.Value.Refund,
-                p.Value.Gross - p.Value.Refund, p.Value.Units)).ToArray();
-        var kpis = new ReportKpis(series.Sum(p => p.OrderCount), series.Sum(p => p.DeliveredCount), series.Sum(p => p.GrossRevenue),
-            series.Sum(p => p.RefundAmount), series.Sum(p => p.NetRevenue), series.Sum(p => p.UnitsSold));
+        static double Average(double gross, int delivered) => delivered == 0 ? 0 : Math.Round(gross / delivered, 0);
+        var series = points.Values.Select(p => new ReportPoint(
+            p.Period.Key, p.Period.Label, p.Period.Start.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture),
+            p.Period.End.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture),
+            p.Data.Orders, p.Data.Delivered, p.Data.Gross, p.Data.Refund, p.Data.Gross - p.Data.Refund, p.Data.Units,
+            p.Data.Merchandise, p.Data.Shipping, p.Data.Discount, Average(p.Data.Gross, p.Data.Delivered),
+            p.Data.Cancelled)).ToArray();
+        var gross = series.Sum(p => p.GrossRevenue);
+        var deliveredCount = series.Sum(p => p.DeliveredCount);
+        var kpis = new ReportKpis(series.Sum(p => p.OrderCount), deliveredCount, gross,
+            series.Sum(p => p.RefundAmount), series.Sum(p => p.NetRevenue), series.Sum(p => p.UnitsSold),
+            series.Sum(p => p.MerchandiseRevenue), series.Sum(p => p.ShippingRevenue), series.Sum(p => p.DiscountAmount),
+            Average(gross, deliveredCount), series.Sum(p => p.CancelledCount));
         return (kpis, series, deliveredIds);
     }
 

@@ -1,53 +1,106 @@
 using System.Text.RegularExpressions;
+using AuthApi.Data;
 using AuthApi.Security;
+using MongoDB.Bson.Serialization.Attributes;
 using MongoDB.Driver;
 
 namespace AuthApi.Features.Catalog;
 
+[BsonIgnoreExtraElements]
+internal sealed class MediaDocument
+{
+    [BsonElement("media_id")] public long MediaId { get; set; }
+    /// <summary>File base name (a GUID); the master is {file}.webp, versions are {file}-w{width}.webp.</summary>
+    [BsonElement("file")] public string File { get; set; } = string.Empty;
+    [BsonElement("width")] public int Width { get; set; }
+    [BsonElement("height")] public int Height { get; set; }
+    [BsonElement("widths")] public List<int> Widths { get; set; } = [];
+    [BsonElement("original_format")] public string? OriginalFormat { get; set; }
+    [BsonElement("original_bytes")] public long OriginalBytes { get; set; }
+    [BsonElement("uploaded_by")] public long? UploadedBy { get; set; }
+    [BsonElement("created_at")] public DateTime CreatedAt { get; set; }
+}
+
 /// <summary>
 /// Product image upload (admin) and serving. Files live in the folder given by Uploads__Path
 /// (a Docker volume in compose) and are exposed under /api/media so they share the /api proxy.
+/// See <see cref="ImageStandard"/> for the accepted images.
 /// </summary>
 internal static partial class MediaEndpoints
 {
-    private const long MaxBytes = 5 * 1024 * 1024;
-
-    [GeneratedRegex(@"\A[0-9a-f]{32}\.(jpg|png|webp)\z")]
+    [GeneratedRegex(@"\A[0-9a-f]{32}(-w(400|800|1200))?\.(jpg|png|webp)\z")]
     private static partial Regex FileNamePattern();
 
+    public static string UrlFor(string file, int? width = null) =>
+        width is null ? $"/api/media/{file}.webp" : $"/api/media/{file}-w{width}.webp";
+
+    public static Dictionary<string, string>? Srcset(string? file, IEnumerable<int>? widths) =>
+        file is null || widths is null
+            ? null
+            : widths.OrderBy(w => w).ToDictionary(w => $"w{w}", w => UrlFor(file, w));
+
+    public static async Task SetupAsync(IMongoDatabase db, CounterService counters)
+    {
+        await IdCounters.SyncAsync(db, counters, "media", "media", "media_id");
+    }
+
     public static void MapMediaEndpoints(
-        this IEndpointRouteBuilder app, IMongoCollection<User> users, string uploadFolder)
+        this IEndpointRouteBuilder app, IMongoCollection<User> users, IMongoDatabase db, CounterService counters,
+        string uploadFolder)
     {
         Directory.CreateDirectory(uploadFolder);
         var currentUsers = new CurrentUserService(users);
+        var media = db.GetCollection<MediaDocument>("media");
+
+        static IResult Invalid(string message) =>
+            Results.ValidationProblem(new Dictionary<string, string[]> { ["file"] = [message] });
+
+        app.MapGet("/api/media-standard", () => Results.Ok(ImageStandard.Describe()));
 
         app.MapPost("/api/admin/uploads/images", async (HttpContext context) =>
         {
-            var (_, error) = await currentUsers.ResolveAsync(context, UserRoles.Admin);
+            var (admin, error) = await currentUsers.ResolveAsync(context, UserRoles.Admin);
             if (error is not null) return error;
-            if (!context.Request.HasFormContentType || context.Request.ContentLength > MaxBytes + 64 * 1024)
-                return Results.ValidationProblem(new Dictionary<string, string[]> { ["file"] = ["Send a multipart form with a 'file' field of at most 5 MB."] });
+            if (!context.Request.HasFormContentType || context.Request.ContentLength > ImageStandard.MaxBytes + 64 * 1024)
+                return Invalid("Send a multipart form with a 'file' field of at most 20 MB.");
 
             var form = await context.Request.ReadFormAsync(context.RequestAborted);
             var file = form.Files.GetFile("file");
-            if (file is null || file.Length == 0 || file.Length > MaxBytes)
-                return Results.ValidationProblem(new Dictionary<string, string[]> { ["file"] = ["Provide an image file of at most 5 MB."] });
+            if (file is null || file.Length == 0 || file.Length > ImageStandard.MaxBytes)
+                return Invalid("Provide an image file of at most 20 MB.");
 
-            await using var stream = file.OpenReadStream();
-            var header = new byte[12];
-            var read = await stream.ReadAsync(header.AsMemory(0, header.Length), context.RequestAborted);
-            var extension = Detect(header.AsSpan(0, read));
-            if (extension is null)
-                return Results.ValidationProblem(new Dictionary<string, string[]> { ["file"] = ["Only JPEG, PNG or WebP images are accepted."] });
-
-            var name = $"{Guid.NewGuid():N}.{extension}";
-            stream.Position = 0;
-            await using (var target = File.Create(Path.Combine(uploadFolder, name)))
+            byte[] data;
+            await using (var stream = file.OpenReadStream())
             {
-                await stream.CopyToAsync(target, context.RequestAborted);
+                using var buffer = new MemoryStream((int)file.Length);
+                await stream.CopyToAsync(buffer, context.RequestAborted);
+                data = buffer.ToArray();
             }
 
-            return Results.Created($"/api/media/{name}", new UploadResponse($"/api/media/{name}", name, file.Length));
+            var baseName = Guid.NewGuid().ToString("N");
+            ProcessedImage processed;
+            try
+            {
+                processed = await Task.Run(() => ImageProcessor.Process(data, uploadFolder, baseName), context.RequestAborted);
+            }
+            catch (ImageRejectedException rejected)
+            {
+                return Invalid(rejected.Message);
+            }
+
+            var document = new MediaDocument
+            {
+                MediaId = await counters.NextAsync("media"), File = baseName, Width = processed.Width,
+                Height = processed.Height, Widths = processed.Widths, OriginalFormat = processed.Format,
+                OriginalBytes = processed.OriginalBytes, UploadedBy = admin!.UserId, CreatedAt = DateTime.UtcNow
+            };
+            await media.InsertOneAsync(document);
+
+            var url = UrlFor(baseName);
+            return Results.Created(url, new UploadResponse(
+                url, $"{baseName}.webp", processed.OriginalBytes, document.MediaId, processed.Width, processed.Height,
+                Math.Round((double)processed.Width / processed.Height, 4), processed.Format,
+                Srcset(baseName, processed.Widths)!, processed.Warnings));
         }).RequireAuthorization();
 
         app.MapGet("/api/media/{fileName}", (string fileName, HttpContext context) =>
@@ -59,16 +112,5 @@ internal static partial class MediaEndpoints
             var contentType = fileName.EndsWith(".png") ? "image/png" : fileName.EndsWith(".webp") ? "image/webp" : "image/jpeg";
             return Results.File(path, contentType);
         });
-    }
-
-    /// <summary>Recognises the format from magic bytes, not from the client-supplied name or type.</summary>
-    private static string? Detect(ReadOnlySpan<byte> h)
-    {
-        if (h.Length >= 3 && h[0] == 0xFF && h[1] == 0xD8 && h[2] == 0xFF) return "jpg";
-        if (h.Length >= 8 && h[0] == 0x89 && h[1] == 0x50 && h[2] == 0x4E && h[3] == 0x47
-            && h[4] == 0x0D && h[5] == 0x0A && h[6] == 0x1A && h[7] == 0x0A) return "png";
-        if (h.Length >= 12 && h[0] == 'R' && h[1] == 'I' && h[2] == 'F' && h[3] == 'F'
-            && h[8] == 'W' && h[9] == 'E' && h[10] == 'B' && h[11] == 'P') return "webp";
-        return null;
     }
 }

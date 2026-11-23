@@ -107,11 +107,20 @@ internal sealed class AdminOrderService(
 
     // ---- Transitions ----------------------------------------------------------------
 
+    /// <param name="onlyOwnedBy">When set (customer actions) the order must belong to this user, otherwise it is "not found".</param>
+    /// <param name="onlyFrom">When set, the move is only allowed from one of these statuses.</param>
     public async Task<(AdminOrderDetail? Detail, IResult? Error)> TransitionAsync(
-        long adminId, string orderCode, TransitionRequest request)
+        long adminId, string orderCode, TransitionRequest request, long? onlyOwnedBy = null, string[]? onlyFrom = null)
     {
         var order = await orders.Find(o => o.OrderCode == orderCode).FirstOrDefaultAsync();
-        if (order is null) return (null, Results.NotFound());
+        if (order is null || (onlyOwnedBy is { } owner && order.UserId != owner)) return (null, Results.NotFound());
+        if (onlyFrom is not null && !onlyFrom.Contains(order.Status))
+        {
+            return (null, Results.Conflict(new
+            {
+                message = $"This action is only possible while the order is {string.Join(" or ", onlyFrom)}; it is '{order.Status}'."
+            }));
+        }
 
         var option = OrderStateMachine.Options(order).FirstOrDefault(o => o.ToStatus == request.ToStatus);
         if (option is null)

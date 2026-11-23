@@ -43,4 +43,49 @@ internal static class VnTime
         if (weekly) day = day.AddDays(-(((int)day.DayOfWeek + 6) % 7));
         return day.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture);
     }
+
+    public static readonly string[] GroupBys = ["day", "week", "month", "quarter", "year"];
+
+    /// <summary>Longest range a report may cover for a grouping (finer groupings are capped lower).</summary>
+    public static int MaxDaysFor(string groupBy) => groupBy switch
+    {
+        "day" => 366,
+        "week" => 731,
+        _ => 1827
+    };
+
+    /// <summary>A reporting period (day, ISO week, month, quarter or year) in Vietnam local time.</summary>
+    public readonly record struct Period(string Key, string Label, DateOnly Start, DateOnly End);
+
+    public static Period PeriodOf(DateOnly day, string groupBy)
+    {
+        var inv = CultureInfo.InvariantCulture;
+        switch (groupBy)
+        {
+            case "week":
+                var monday = day.AddDays(-(((int)day.DayOfWeek + 6) % 7));
+                var sunday = monday.AddDays(6);
+                var asDate = monday.ToDateTime(TimeOnly.MinValue);
+                var week = ISOWeek.GetWeekOfYear(asDate);
+                var year = ISOWeek.GetYear(asDate);
+                return new Period($"{year}-W{week:00}",
+                    $"Tuần {week}/{year} ({monday:dd/MM} – {sunday:dd/MM})", monday, sunday);
+            case "month":
+                var first = new DateOnly(day.Year, day.Month, 1);
+                return new Period(first.ToString("yyyy-MM", inv), $"Tháng {day.Month}/{day.Year}",
+                    first, first.AddMonths(1).AddDays(-1));
+            case "quarter":
+                var quarter = (day.Month - 1) / 3 + 1;
+                var start = new DateOnly(day.Year, (quarter - 1) * 3 + 1, 1);
+                return new Period($"{day.Year}-Q{quarter}", $"Quý {quarter}/{day.Year}", start, start.AddMonths(3).AddDays(-1));
+            case "year":
+                var jan = new DateOnly(day.Year, 1, 1);
+                return new Period(day.Year.ToString(inv), $"Năm {day.Year}", jan, new DateOnly(day.Year, 12, 31));
+            default:
+                return new Period(day.ToString("yyyy-MM-dd", inv), day.ToString("dd/MM/yyyy", inv), day, day);
+        }
+    }
+
+    public static Period PeriodOf(DateTime utc, string groupBy) =>
+        PeriodOf(DateOnly.FromDateTime(ToLocal(utc)), groupBy);
 }

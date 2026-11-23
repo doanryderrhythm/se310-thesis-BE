@@ -6,44 +6,55 @@ namespace AuthApi.Features.Reports;
 
 internal static class ReportEndpoints
 {
+    /// <summary>Validates groupBy (default day) and the from/to range that fits that grouping.</summary>
+    private static IResult? ParseQuery(
+        string? from, string? to, string? groupBy, out DateOnly f, out DateOnly t, out string group)
+    {
+        group = string.IsNullOrWhiteSpace(groupBy) ? "day" : groupBy.Trim().ToLowerInvariant();
+        f = t = default;
+        if (!VnTime.GroupBys.Contains(group))
+        {
+            return Results.ValidationProblem(new Dictionary<string, string[]>
+            {
+                ["groupBy"] = [$"groupBy must be one of: {string.Join(", ", VnTime.GroupBys)}."]
+            });
+        }
+
+        return VnTime.TryParseRange(from, to, 30, VnTime.MaxDaysFor(group), out f, out t, out var message)
+            ? null
+            : Results.ValidationProblem(new Dictionary<string, string[]> { ["range"] = [message!] });
+    }
+
     public static void MapReportEndpoints(
         this IEndpointRouteBuilder app, IMongoCollection<User> users, ReportService reports)
     {
         var currentUsers = new CurrentUserService(users);
         var group = app.MapGroup("/api/admin").RequireAuthorization();
 
-        group.MapGet("/dashboard", async (HttpContext c, string? from, string? to) =>
+        group.MapGet("/dashboard", async (HttpContext c, string? from, string? to, string? groupBy) =>
         {
             var (_, error) = await currentUsers.ResolveAsync(c, UserRoles.Admin);
             if (error is not null) return error;
-            if (!VnTime.TryParseRange(from, to, 30, ReportService.MaxDays, out var f, out var t, out var message))
-                return Results.ValidationProblem(new Dictionary<string, string[]> { ["range"] = [message!] });
-            return Results.Ok(await reports.DashboardAsync(f, t));
+            return ParseQuery(from, to, groupBy, out var f, out var t, out var g)
+                ?? Results.Ok(await reports.DashboardAsync(f, t, g));
         });
 
         group.MapGet("/reports", async (HttpContext c, string? from, string? to, string? groupBy) =>
         {
             var (_, error) = await currentUsers.ResolveAsync(c, UserRoles.Admin);
             if (error is not null) return error;
-            var errors = new Dictionary<string, string[]>();
-            if (groupBy is not (null or "" or "day" or "week")) errors["groupBy"] = ["groupBy must be day or week."];
-            if (!VnTime.TryParseRange(from, to, 30, ReportService.MaxDays, out var f, out var t, out var message))
-                errors["range"] = [message!];
-            if (errors.Count > 0) return Results.ValidationProblem(errors);
-            return Results.Ok(await reports.ReportAsync(f, t, groupBy == "week"));
+            return ParseQuery(from, to, groupBy, out var f, out var t, out var g)
+                ?? Results.Ok(await reports.ReportAsync(f, t, g));
         });
 
         group.MapGet("/reports/export", async (HttpContext c, string? from, string? to, string? groupBy) =>
         {
             var (_, error) = await currentUsers.ResolveAsync(c, UserRoles.Admin);
             if (error is not null) return error;
-            var errors = new Dictionary<string, string[]>();
-            if (groupBy is not (null or "" or "day" or "week")) errors["groupBy"] = ["groupBy must be day or week."];
-            if (!VnTime.TryParseRange(from, to, 30, ReportService.MaxDays, out var f, out var t, out var message))
-                errors["range"] = [message!];
-            if (errors.Count > 0) return Results.ValidationProblem(errors);
-            var csv = await reports.ExportCsvAsync(f, t, groupBy == "week");
-            return Results.File(csv, "text/csv; charset=utf-8", $"report_{f:yyyy-MM-dd}_{t:yyyy-MM-dd}.csv");
+            var invalid = ParseQuery(from, to, groupBy, out var f, out var t, out var g);
+            if (invalid is not null) return invalid;
+            var csv = await reports.ExportCsvAsync(f, t, g);
+            return Results.File(csv, "text/csv; charset=utf-8", $"report_{g}_{f:yyyy-MM-dd}_{t:yyyy-MM-dd}.csv");
         });
     }
 }

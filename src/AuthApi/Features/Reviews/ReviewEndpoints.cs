@@ -1,4 +1,5 @@
 using AuthApi.Data;
+using AuthApi.Features.Orders;
 using AuthApi.Security;
 using MongoDB.Bson;
 using MongoDB.Bson.Serialization.Attributes;
@@ -28,6 +29,9 @@ internal sealed record ReviewResponse(
 internal sealed record MyReviewResponse(
     long ReviewId, long ProductId, string? ProductName, int Rating, string? Comment,
     string Status, DateTime CreatedAt);
+internal sealed record ReviewableItemResponse(
+    string OrderCode, long OrderItemId, long ProductId, string? ProductName, string? ImageUrl, string? Sku,
+    string? Size, string? Color, DateTime? DeliveredAt);
 internal sealed record ReviewPageResponse(
     ReviewResponse[] Items, int Page, int PageSize, long TotalCount, double AverageRating);
 
@@ -51,6 +55,23 @@ internal static class ReviewEndpoints
         var reviews = db.GetCollection<ProductReviewDocument>("product_reviews");
         var products = db.GetCollection<ProductDocument>("products");
         var currentUsers = new CurrentUserService(users);
+        var orders = db.GetCollection<OrderDocument>("orders");
+        var orderItems = db.GetCollection<OrderItemDocument>("order_items");
+        var productImages = db.GetCollection<ProductImageDocument>("product_images");
+
+        // The customer's delivered purchases of a product, newest first.
+        async Task<List<(OrderDocument Order, OrderItemDocument Line)>> DeliveredPurchasesAsync(long userId, IEnumerable<long>? productIds = null)
+        {
+            var delivered = await orders.Find(o => o.UserId == userId && o.Status == OrderStatuses.Delivered)
+                .SortByDescending(o => o.DeliveredAt).ToListAsync();
+            if (delivered.Count == 0) return [];
+            var filter = Builders<OrderItemDocument>.Filter.In(i => i.OrderId, delivered.Select(o => o.OrderId));
+            if (productIds is not null) filter &= Builders<OrderItemDocument>.Filter.In(i => i.ProductId, productIds.Select(id => (long?)id));
+            var lines = await orderItems.Find(filter).ToListAsync();
+            var byOrder = delivered.ToDictionary(o => o.OrderId);
+            return lines.Where(l => l.ProductId is not null).Select(l => (byOrder[l.OrderId], l))
+                .OrderByDescending(x => x.Item1.DeliveredAt).ThenByDescending(x => x.l.OrderItemId).ToList();
+        }
 
         async Task<bool> ActiveProductExists(long productId) =>
             await products.Find(p => p.ProductId == productId && p.Status == "active").AnyAsync();
@@ -105,11 +126,22 @@ internal static class ReviewEndpoints
             if (!await ActiveProductExists(productId))
                 return Results.NotFound(new { message = "Product not found." });
 
+            var purchases = await DeliveredPurchasesAsync(user!.UserId, [productId]);
+            if (purchases.Count == 0)
+            {
+                return Results.Conflict(new
+                {
+                    message = "You can only review a product from an order that was delivered to you.",
+                    code = "REVIEW_NOT_PURCHASED"
+                });
+            }
+
             var review = new ProductReviewDocument
             {
                 ReviewId = await counters.NextAsync("product_reviews"),
                 ProductId = productId,
-                UserId = user!.UserId,
+                OrderItemId = purchases[0].Line.OrderItemId,
+                UserId = user.UserId,
                 Rating = request.Rating!.Value,
                 Comment = comment,
                 Status = "published",
@@ -127,6 +159,35 @@ internal static class ReviewEndpoints
             return Results.Created($"/api/customers/me/reviews/{review.ReviewId}",
                 new ReviewResponse(review.ReviewId, productId, user.FullName,
                     review.Rating, review.Comment, review.CreatedAt));
+        });
+
+        app.MapGet("/api/customers/me/reviewable-items", async (HttpContext context) =>
+        {
+            var (user, error) = await currentUsers.ResolveAsync(context, UserRoles.Customer);
+            if (error is not null) return error;
+            var purchases = await DeliveredPurchasesAsync(user!.UserId);
+            var productIds = purchases.Select(p => p.Line.ProductId!.Value).Distinct().ToArray();
+            var reviewed = (await reviews.Find(r => r.UserId == user.UserId && productIds.Contains(r.ProductId))
+                .Project(r => r.ProductId).ToListAsync()).ToHashSet();
+            var active = (await products.Find(Builders<ProductDocument>.Filter.In(p => p.ProductId, productIds)
+                & Builders<ProductDocument>.Filter.Eq(p => p.Status, "active")).Project(p => p.ProductId).ToListAsync()).ToHashSet();
+            var primaryImage = (await productImages.Find(Builders<ProductImageDocument>.Filter.In(i => i.ProductId, productIds)).ToListAsync())
+                .GroupBy(i => i.ProductId).ToDictionary(g => g.Key,
+                    g => g.OrderBy(i => i.SortOrder ?? int.MaxValue).ThenBy(i => i.ImageId).First().ImageUrl);
+
+            // One review per product, so list each product once, from its latest delivered order.
+            var seen = new HashSet<long>();
+            var result = new List<ReviewableItemResponse>();
+            foreach (var (order, line) in purchases)
+            {
+                var productId = line.ProductId!.Value;
+                if (reviewed.Contains(productId) || !active.Contains(productId) || !seen.Add(productId)) continue;
+                result.Add(new ReviewableItemResponse(order.OrderCode, line.OrderItemId, productId, line.ProductNameSnapshot,
+                    line.ImageUrlSnapshot ?? primaryImage.GetValueOrDefault(productId), line.SkuSnapshot,
+                    line.SizeSnapshot, line.ColorSnapshot, order.DeliveredAt));
+            }
+
+            return Results.Ok(result);
         });
 
         var mine = app.MapGroup("/api/customers/me/reviews").RequireAuthorization();

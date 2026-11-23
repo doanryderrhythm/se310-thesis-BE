@@ -5,7 +5,7 @@ const schema = [
     fields: {
       user_id: "int", full_name: "string", email: "string", phone: "string",
       password_hash: "string", role: "string", status: "string",
-      status_reason: "string", status_changed_at: "date",
+      status_reason: "string", status_changed_at: "date", password_changed_at: "date",
       created_at: "date", updated_at: "date"
     },
     required: ["user_id", "full_name", "phone", "password_hash"],
@@ -62,7 +62,7 @@ const schema = [
     id: "size_chart_id",
     fields: {
       size_chart_id: "int", name: "string", description: "string",
-      category_id: "int", created_at: "date"
+      category_id: "int", is_default: "bool", created_at: "date", updated_at: "date"
     },
     required: ["size_chart_id"],
     indexes: ["category_id"]
@@ -73,7 +73,9 @@ const schema = [
     fields: {
       size_chart_item_id: "int", size_chart_id: "int", size_label: "string",
       chest_cm: "decimal", waist_cm: "decimal", hip_cm: "decimal",
-      length_cm: "decimal", notes: "string"
+      length_cm: "decimal", notes: "string",
+      height_min_cm: "decimal", height_max_cm: "decimal",
+      weight_min_kg: "decimal", weight_max_kg: "decimal", display_order: "int"
     },
     required: ["size_chart_item_id", "size_chart_id"],
     indexes: ["size_chart_id"]
@@ -81,7 +83,7 @@ const schema = [
   {
     name: "sizes",
     id: "size_id",
-    fields: { size_id: "int", name: "string", status: "string" },
+    fields: { size_id: "int", name: "string", status: "string", display_order: "int" },
     required: ["size_id"],
     indexes: []
   },
@@ -95,23 +97,84 @@ const schema = [
     indexes: []
   },
   {
+    name: "materials",
+    id: "material_id",
+    fields: {
+      material_id: "int", name: "string", slug: "string", description: "string",
+      display_order: "int", status: "string", created_at: "date", updated_at: "date"
+    },
+    required: ["material_id", "name"],
+    indexes: [],
+    uniqueIndexes: ["slug"]
+  },
+  {
+    name: "occasions",
+    id: "occasion_id",
+    fields: {
+      occasion_id: "int", name: "string", slug: "string", description: "string",
+      display_order: "int", status: "string", created_at: "date", updated_at: "date"
+    },
+    required: ["occasion_id", "name"],
+    indexes: [],
+    uniqueIndexes: ["slug"]
+  },
+  {
+    name: "media",
+    id: "media_id",
+    fields: {
+      media_id: "int", file: "string", width: "int", height: "int", widths: "array",
+      original_format: "string", original_bytes: "int", uploaded_by: "int", created_at: "date"
+    },
+    required: ["media_id", "file"],
+    indexes: []
+  },
+  {
+    name: "suppliers",
+    id: "supplier_id",
+    fields: {
+      supplier_id: "int", name: "string", phone: "string", email: "string",
+      address: "string", tax_code: "string", note: "string", status: "string",
+      created_at: "date", updated_at: "date"
+    },
+    required: ["supplier_id", "name"],
+    indexes: []
+  },
+  {
+    name: "goods_receipts",
+    id: "receipt_id",
+    fields: {
+      receipt_id: "int", receipt_code: "string", supplier_id: "int", supplier_name: "string",
+      supplier_invoice_no: "string", received_at: "date", note: "string", status: "string",
+      items: "array", total_quantity: "int", total_amount: "decimal",
+      created_by: "int", created_at: "date", updated_at: "date",
+      completed_at: "date", completed_by: "int", cancelled_at: "date", cancel_reason: "string",
+      completion_token: "string", completion_locked_at: "date"
+    },
+    required: ["receipt_id", "receipt_code", "supplier_id"],
+    indexes: ["supplier_id"],
+    uniqueIndexes: ["receipt_code"]
+  },
+  {
     name: "products",
     id: "product_id",
     fields: {
       product_id: "int", category_id: "int", size_chart_id: "int",
       name: "string", slug: "string", description: "string", material: "string",
       base_price: "decimal", status: "string",
+      material_id: "int", occasion_ids: "array", care_instructions: "string", search_text: "string",
       created_at: "date", updated_at: "date"
     },
     required: ["product_id", "category_id"],
-    indexes: ["category_id", "size_chart_id"]
+    indexes: ["category_id", "size_chart_id", "material_id", "occasion_ids"]
   },
   {
     name: "product_images",
     id: "image_id",
     fields: {
       image_id: "int", product_id: "int", image_url: "string",
-      alt_text: "string", color_id: "int", sort_order: "int"
+      alt_text: "string", color_id: "int", sort_order: "int", is_primary: "bool",
+      media_id: "int", media_file: "string", width: "int", height: "int", widths: "array",
+      focal_x: "decimal", focal_y: "decimal"
     },
     required: ["image_id", "product_id"],
     indexes: ["product_id"]
@@ -132,7 +195,7 @@ const schema = [
     id: "inventory_id",
     fields: {
       inventory_id: "int", variant_id: "int", quantity_on_hand: "int",
-      quantity_reserved: "int", low_stock_threshold: "int",
+      quantity_reserved: "int", low_stock_threshold: "int", average_cost: "decimal",
       updated_at: "date"
     },
     required: ["inventory_id", "variant_id"],
@@ -153,7 +216,7 @@ const schema = [
     id: "cart_item_id",
     fields: {
       cart_item_id: "int", cart_id: "int", variant_id: "int",
-      quantity: "int", added_at: "date"
+      quantity: "int", added_at: "date", selected: "bool", price_at_add: "decimal"
     },
     required: ["cart_item_id", "cart_id", "variant_id"],
     indexes: ["cart_id", "variant_id"]
@@ -264,7 +327,7 @@ const schema = [
     fields: {
       order_item_id: "int", order_id: "int", variant_id: "int",
       product_id: "int", product_name_snapshot: "string", sku_snapshot: "string",
-      size_snapshot: "string", color_snapshot: "string",
+      size_snapshot: "string", color_snapshot: "string", image_url_snapshot: "string",
       quantity: "int", unit_price: "decimal", discount_amount: "decimal",
       line_total: "decimal"
     },

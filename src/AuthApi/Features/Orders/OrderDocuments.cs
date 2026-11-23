@@ -103,6 +103,8 @@ internal sealed class OrderItemDocument
     [BsonElement("product_id")] public long? ProductId { get; set; }
     [BsonElement("product_name_snapshot")] public string? ProductNameSnapshot { get; set; }
     [BsonElement("sku_snapshot")] public string? SkuSnapshot { get; set; }
+    /// <summary>Image shown when the order was placed; the order API that creates orders should fill it.</summary>
+    [BsonElement("image_url_snapshot")] [BsonIgnoreIfNull] public string? ImageUrlSnapshot { get; set; }
     [BsonElement("size_snapshot")] public string? SizeSnapshot { get; set; }
     [BsonElement("color_snapshot")] public string? ColorSnapshot { get; set; }
     [BsonElement("quantity")] public int Quantity { get; set; }

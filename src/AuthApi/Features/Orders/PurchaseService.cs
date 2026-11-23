@@ -44,6 +44,8 @@ internal sealed class PurchaseService(
         if (note?.Length > 1000) errors["customerNote"] = ["Customer note must be at most 1000 characters."];
 
         CouponItemRequest[] items;
+        // Buying from the cart only takes the lines the customer ticked (a missing flag counts as ticked).
+        var fromCart = request.Items is not { Length: > 0 };
         if (request.Items is { Length: > 0 })
         {
             items = request.Items;
@@ -55,6 +57,7 @@ internal sealed class PurchaseService(
                 items = [];
             else
                 items = (await cartItems.Find(i => i.CartId == cart.CartId).ToListAsync())
+                    .Where(i => i.Selected != false)
                     .Select(i => new CouponItemRequest(i.VariantId, i.Quantity)).ToArray();
         }
 
@@ -226,9 +229,15 @@ internal sealed class PurchaseService(
             var activeCart = await carts.Find(c => c.UserId == userId && c.Status == "active").FirstOrDefaultAsync();
             if (activeCart is not null)
             {
-                await cartItems.DeleteManyAsync(i => i.CartId == activeCart.CartId);
-                await carts.UpdateOneAsync(c => c.CartId == activeCart.CartId,
-                    MongoDB.Driver.Builders<CartDocument>.Update.Set(c => c.Status, "converted").Set(c => c.UpdatedAt, now));
+                // Remove what was bought; ticked-off lines stay in the cart for later.
+                var bought = snapshots.Select(l => l.VariantId).ToArray();
+                await cartItems.DeleteManyAsync(i => i.CartId == activeCart.CartId
+                    && (!fromCart || bought.Contains(i.VariantId)));
+                if (!await cartItems.Find(i => i.CartId == activeCart.CartId).AnyAsync())
+                {
+                    await carts.UpdateOneAsync(c => c.CartId == activeCart.CartId,
+                        MongoDB.Driver.Builders<CartDocument>.Update.Set(c => c.Status, "converted").Set(c => c.UpdatedAt, now));
+                }
             }
         }
         catch

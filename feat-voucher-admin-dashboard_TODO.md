@@ -5,7 +5,8 @@
 > Khi nối xong một mục: đổi `☐` thành `☑` và ghi tên người làm.
 
 - Snapshot FE đã đối chiếu: `se310-thesis-FE@70a473e` (đã nối: đăng ký, đăng nhập, hồ sơ — chỉ `fullName`, danh sách/thêm địa chỉ, tìm kiếm sản phẩm).
-- Chưa có API (không nằm trong tài liệu này): đặt đơn, đơn của tôi, hủy đơn — xem **Phần C**.
+- Chưa có API (không nằm trong tài liệu này): đặt đơn (báo giá + tạo đơn) — xem **Phần C**. Đơn của tôi / hủy đơn / danh sách sản phẩm công khai đã có ở nhánh sau.
+- ⚠️ **Đã đổi ở nhánh `vantri/feat-catalog-purchasing-orders-reports`** (xem [`feat-catalog-purchasing-orders-reports_TODO.md`](feat-catalog-purchasing-orders-reports_TODO.md), mục 1): bỏ `initialOnHand` và tăng tồn thủ công (dùng phiếu nhập hàng), upload ảnh theo chuẩn mới (`mediaId`, 3:4, ≥ 900×1200), kích hoạt SP cần chất liệu + công dụng, báo cáo `groupBy` thêm month/quarter/year và `period` tuần là `2026-W47`, review cần đơn đã giao. Nếu mục bên dưới mâu thuẫn, **file mới thắng**.
 
 ---
 
