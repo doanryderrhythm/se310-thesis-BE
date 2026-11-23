@@ -235,16 +235,16 @@ voucher. Coupon failures come back as
 by this customer), `COUPON_MIN` (below the minimum order amount),
 `COUPON_NOT_ELIGIBLE` (no cart line matches the coupon's categories).
 
-Orders: the **customer** "place order" / "my orders" / cancel endpoints do not exist
-yet, so nothing creates orders or consumes a coupon at checkout. When they are
-built they must reuse the shared services: `CouponService.QuoteAsync` /
-`RedeemAsync` (price + atomically use up the coupon), `InventoryService.ReserveAsync`
-(reserve stock) and the order documents in `Features/Orders`. The admin side is
-already wired: cancelling an order calls `CouponService.ReleaseAsync` and
-releases the reservation, and moving an order to `delivered` calls
-`VoucherIssuer.IssueSpendVouchersAsync`, so `spend` campaigns (e.g. `THANTHIET`)
-fire automatically. Until customer checkout exists, `usageCount` / `used` /
-`totalDiscount` stay at 0 for real traffic (the demo seed fills them).
+Customer checkout is available through `POST /api/orders` (also available as
+`POST /api/orders/purchase`). It uses `CouponService.QuoteAsync` /
+`RedeemAsync` to price and atomically consume a coupon, and
+`InventoryService.ReserveAsync` to reserve stock before creating the order
+documents in `Features/Orders`. The admin side is already wired: cancelling an
+order calls `CouponService.ReleaseAsync` and releases the reservation, and
+moving an order to `delivered` calls
+`VoucherIssuer.IssueSpendVouchersAsync`, so `spend` campaigns (e.g.
+`THANTHIET`) fire automatically. The **my orders** and customer **cancel
+order** endpoints are not implemented yet.
 
 ### Seed data and existing volumes
 
@@ -345,7 +345,7 @@ Validation keys to translate: `name`, `slug`, `categoryId`, `description`,
 | `PATCH /api/admin/inventory/{variantId}` | `{"lowStockThreshold": 5}` |
 | `GET /api/admin/inventory/{variantId}/movements?page=&pageSize=` | History `{type, deltaOnHand, deltaReserved, onHandAfter, reservedAfter, reason, refType, refId, actor, createdAt}`; types `initial`, `adjust_increase`, `adjust_decrease`, `reserve`, `release`, `ship`, `restock` |
 
-Stock rules (shared with the future checkout): placing an order reserves stock;
+Stock rules (shared with checkout): placing an order reserves stock;
 cancelling before hand-over releases it; handing over to the carrier
 (`packing → shipping`) takes it off the shelf; goods that pass inspection
 (returned-to-shop orders, customer returns) go back on the shelf.
@@ -354,6 +354,7 @@ cancelling before hand-over releases it; handing over to the carrier
 
 | Endpoint | Purpose |
 | --- | --- |
+| `POST /api/orders` · `POST /api/orders/purchase` | Customer purchase. Optional header `Idempotency-Key` prevents duplicate orders for retries. Request: `{"addressId"?,"items"?,"code"?,"couponCode"?,"userCouponId"?,"paymentMethod":"cod\|bank_transfer","customerNote"?}`. If `items` is omitted, uses the customer's active cart; `addressId` is also optional when a saved address exists (the default address is preferred). Items use 1–50 distinct variants, quantity 1–99. Creates status `pending`, reserves stock, consumes one coupon, clears the cart, and returns `201` with the order snapshot. COD payment status is `unpaid`; bank transfer is `pending`. `400` for address, coupon or input errors; `409` for unavailable stock or a coupon changed/reached its limit |
 | `GET /api/admin/orders?q=&status=&paymentStatus=&paymentMethod=&from=&to=&page=&pageSize=` | Table; `q` = order code or recipient phone; `status` may be a comma list (e.g. `confirmed,packing`) |
 | `GET /api/admin/orders/counts` | `{byStatus:{…}, tabs:{new, toPack, shipping, failed, returning}}` for the tab badges |
 | `GET /api/admin/orders/{orderCode}` | Snapshot, customer, shipping address, items, payment, `deliveryAttempts`, `history`, **`allowedTransitions`** (render exactly these buttons), `canConfirmPaid`, `canConfirmRefunded`, `maxDeliveryAttempts` |

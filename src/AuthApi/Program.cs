@@ -262,6 +262,8 @@ app.MapReturnEndpoints(users, new ReturnService(
     mongoDatabase, counterService, inventoryService, notificationService, app.Logger));
 app.MapAdminOrderEndpoints(users, new AdminOrderService(
     mongoDatabase, counterService, inventoryService, couponService, voucherIssuer, notificationService, app.Logger));
+app.MapPurchaseEndpoints(users, new PurchaseService(
+    mongoDatabase, counterService, inventoryService, couponService));
 app.MapNotificationEndpoints(users, notificationService);
 
 app.Run();

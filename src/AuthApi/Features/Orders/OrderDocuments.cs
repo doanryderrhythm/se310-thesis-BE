@@ -65,6 +65,7 @@ internal sealed class OrderDocument
     [BsonElement("total_amount")] public double TotalAmount { get; set; }
     [BsonElement("customer_note")] public string? CustomerNote { get; set; }
     [BsonElement("cancel_reason")] public string? CancelReason { get; set; }
+    [BsonElement("idempotency_key")] [BsonIgnoreIfNull] public string? IdempotencyKey { get; set; }
     [BsonElement("placed_at")] public DateTime PlacedAt { get; set; }
     [BsonElement("updated_at")] public DateTime UpdatedAt { get; set; }
     [BsonElement("delivered_at")] public DateTime? DeliveredAt { get; set; }
