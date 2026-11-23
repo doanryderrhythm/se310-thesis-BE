@@ -31,6 +31,17 @@ internal sealed class AdminOrderService(
         await orders.Indexes.CreateOneAsync(new CreateIndexModel<OrderDocument>(
             Builders<OrderDocument>.IndexKeys.Descending(o => o.PlacedAt),
             new CreateIndexOptions { Name = "placed_at_desc" }));
+        await orders.Indexes.CreateOneAsync(new CreateIndexModel<OrderDocument>(
+            Builders<OrderDocument>.IndexKeys.Ascending(o => o.UserId).Ascending(o => o.IdempotencyKey),
+            new CreateIndexOptions<OrderDocument>
+            {
+                Unique = true,
+                Name = "customer_idempotency_unique",
+                PartialFilterExpression = new MongoDB.Bson.BsonDocument
+                {
+                    { "idempotency_key", new MongoDB.Bson.BsonDocument("$type", "string") }
+                }
+            }));
         foreach (var (counter, collection, field) in new[]
         {
             ("orders", "orders", "order_id"), ("order_items", "order_items", "order_item_id"),

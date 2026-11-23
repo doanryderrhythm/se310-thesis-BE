@@ -337,6 +337,8 @@ app.MapCustomerOrderEndpoints(users, new CustomerOrderService(mongoDatabase, adm
     string.IsNullOrWhiteSpace(bankAccount)
         ? null
         : new BankTransferInfo(builder.Configuration["Store:BankName"], bankAccount, builder.Configuration["Store:BankAccountName"])));
+app.MapPurchaseEndpoints(users, new PurchaseService(
+    mongoDatabase, counterService, inventoryService, couponService));
 app.MapNotificationEndpoints(users, notificationService);
 
 app.Run();
