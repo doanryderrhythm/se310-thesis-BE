@@ -117,6 +117,16 @@ var notificationService = new NotificationService(mongoDatabase, counterService)
 var voucherIssuer = new VoucherIssuer(
     mongoDatabase, counterService, notificationService, app.Services.GetRequiredService<EmailQueue>(), app.Logger);
 var accountService = new AuthApi.Features.Auth.AccountService(users, counters);
+app.MapGet("/api/auth/me", async (HttpContext context) =>
+{
+    if (!long.TryParse(context.User.FindFirstValue(ClaimTypes.NameIdentifier), out var id))
+        return Results.Unauthorized();
+    var user = await users.Find(u => u.UserId == id).FirstOrDefaultAsync();
+    if (user is null || user.Status != "active") return Results.Unauthorized();
+    return Results.Ok(new { userId = user.UserId, user.FullName, user.Phone, user.Email,
+        user.Role, user.CreatedAt, user.UpdatedAt });
+}).RequireAuthorization();
+
 app.MapPost("/api/auth/register", async (RegisterRequest request) =>
 {
     request = AuthApi.Features.Auth.AccountValidator.Normalize(request);

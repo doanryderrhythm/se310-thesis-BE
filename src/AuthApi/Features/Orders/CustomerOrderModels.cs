@@ -1,7 +1,8 @@
 namespace AuthApi.Features.Orders;
 
 internal sealed record CustomerOrderPreviewItem(
-    string? ProductName, string? ImageUrl, string? Size, string? Color, int Quantity);
+    string? ProductName, string? ImageUrl, string? Size, string? Color, int Quantity,
+    long? ProductId = null, double? UnitPrice = null, double? LineTotal = null);
 
 internal sealed record CustomerOrderListItem(
     long OrderId, string OrderCode, string Status, DateTime PlacedAt, double TotalAmount, string? PaymentMethod,

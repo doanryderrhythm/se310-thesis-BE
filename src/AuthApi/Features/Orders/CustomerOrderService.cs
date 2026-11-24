@@ -68,8 +68,8 @@ internal sealed class CustomerOrderService(IMongoDatabase db, AdminOrderService 
             var own = lines.GetValueOrDefault(o.OrderId, []);
             return new CustomerOrderListItem(o.OrderId, o.OrderCode, o.Status, o.PlacedAt, o.TotalAmount, o.PaymentMethod,
                 o.PaymentStatus, own.Sum(i => i.Quantity),
-                own.Take(3).Select(i => new CustomerOrderPreviewItem(i.ProductNameSnapshot, ImageOf(i, imageByProduct),
-                    i.SizeSnapshot, i.ColorSnapshot, i.Quantity)).ToArray(), CanCancel(o));
+                own.Select(i => new CustomerOrderPreviewItem(i.ProductNameSnapshot, ImageOf(i, imageByProduct),
+                    i.SizeSnapshot, i.ColorSnapshot, i.Quantity, i.ProductId, i.UnitPrice, i.LineTotal)).ToArray(), CanCancel(o));
         }).ToArray(), page, pageSize, total);
     }
 
@@ -112,8 +112,8 @@ internal sealed class CustomerOrderService(IMongoDatabase db, AdminOrderService 
             if (!canCancel && !canReturn) continue; // delivered but everything is already being returned
             result.Add(new ActionableOrder(o.OrderId, o.OrderCode, o.Status, o.PlacedAt, o.DeliveredAt, o.TotalAmount,
                 o.PaymentMethod, o.PaymentStatus, own.Sum(i => i.Quantity),
-                own.Take(3).Select(i => new CustomerOrderPreviewItem(i.ProductNameSnapshot, ImageOf(i, imageByProduct),
-                    i.SizeSnapshot, i.ColorSnapshot, i.Quantity)).ToArray(),
+                own.Select(i => new CustomerOrderPreviewItem(i.ProductNameSnapshot, ImageOf(i, imageByProduct),
+                    i.SizeSnapshot, i.ColorSnapshot, i.Quantity, i.ProductId, i.UnitPrice, i.LineTotal)).ToArray(),
                 canCancel, canReturn, canReturn ? o.DeliveredAt?.AddDays(ReturnService.ReturnWindowDays) : null, remaining));
         }
 

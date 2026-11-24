@@ -28,12 +28,13 @@ internal sealed record ReviewResponse(
     long ReviewId, long ProductId, string? ReviewerName, int Rating, string? Comment, DateTime CreatedAt);
 internal sealed record MyReviewResponse(
     long ReviewId, long ProductId, string? ProductName, int Rating, string? Comment,
-    string Status, DateTime CreatedAt);
+    string Status, DateTime CreatedAt, string? ImageUrl = null);
 internal sealed record ReviewableItemResponse(
     string OrderCode, long OrderItemId, long ProductId, string? ProductName, string? ImageUrl, string? Sku,
     string? Size, string? Color, DateTime? DeliveredAt);
 internal sealed record ReviewPageResponse(
-    ReviewResponse[] Items, int Page, int PageSize, long TotalCount, double AverageRating);
+    ReviewResponse[] Items, int Page, int PageSize, long TotalCount, double AverageRating,
+    long ReviewCount, Dictionary<int, int> RatingCounts, long WithCommentCount);
 
 internal static class ReviewEndpoints
 {
@@ -76,7 +77,7 @@ internal static class ReviewEndpoints
         async Task<bool> ActiveProductExists(long productId) =>
             await products.Find(p => p.ProductId == productId && p.Status == "active").AnyAsync();
 
-        app.MapGet("/api/products/{productId:long}/reviews", async (long productId, int? page, int? pageSize) =>
+        app.MapGet("/api/products/{productId:long}/reviews", async (long productId, int? page, int? pageSize, int? rating, bool? hasComment) =>
         {
             var currentPage = page ?? 1;
             var currentPageSize = pageSize ?? 10;
@@ -89,12 +90,18 @@ internal static class ReviewEndpoints
                 });
             }
 
+            if (rating is < 1 or > 5) return Results.ValidationProblem(new Dictionary<string, string[]> { ["rating"] = ["Rating must be between 1 and 5."] });
             if (!await ActiveProductExists(productId))
                 return Results.NotFound(new { message = "Product not found." });
 
             var filter = Builders<ProductReviewDocument>.Filter.Where(
                 r => r.ProductId == productId && r.Status == "published");
             var ratings = await reviews.Find(filter).Project(r => r.Rating).ToListAsync();
+            var withComment = Builders<ProductReviewDocument>.Filter.Ne(r => r.Comment, null) & Builders<ProductReviewDocument>.Filter.Ne(r => r.Comment, "");
+            var withCommentCount = await reviews.CountDocumentsAsync(filter & withComment);
+            if (rating is { } stars) filter &= Builders<ProductReviewDocument>.Filter.Eq(r => r.Rating, stars);
+            if (hasComment == true) filter &= withComment;
+            var filteredCount = await reviews.CountDocumentsAsync(filter);
             var pageItems = await reviews.Find(filter)
                 .Sort(Builders<ProductReviewDocument>.Sort.Descending(r => r.CreatedAt).Descending(r => r.ReviewId))
                 .Skip((currentPage - 1) * currentPageSize).Limit(currentPageSize).ToListAsync();
@@ -105,8 +112,9 @@ internal static class ReviewEndpoints
             return Results.Ok(new ReviewPageResponse(
                 pageItems.Select(r => new ReviewResponse(r.ReviewId, r.ProductId,
                     names.GetValueOrDefault(r.UserId), r.Rating, r.Comment, r.CreatedAt)).ToArray(),
-                currentPage, currentPageSize, ratings.Count,
-                ratings.Count == 0 ? 0 : Math.Round(ratings.Average(), 2)));
+                currentPage, currentPageSize, filteredCount,
+                ratings.Count == 0 ? 0 : Math.Round(ratings.Average(), 2), ratings.Count,
+                Enumerable.Range(1, 5).ToDictionary(star => star, star => ratings.Count(value => value == star)), withCommentCount));
         });
 
         app.MapPost("/api/products/{productId:long}/reviews",
@@ -200,8 +208,10 @@ internal static class ReviewEndpoints
             var productIds = own.Select(r => r.ProductId).Distinct().ToArray();
             var names = (await products.Find(Builders<ProductDocument>.Filter.In(p => p.ProductId, productIds))
                 .ToListAsync()).ToDictionary(p => p.ProductId, p => p.Name);
+            var ownImages = (await productImages.Find(Builders<ProductImageDocument>.Filter.In(i => i.ProductId, productIds)).ToListAsync())
+                .GroupBy(i => i.ProductId).ToDictionary(g => g.Key, g => g.OrderBy(i => i.SortOrder ?? int.MaxValue).ThenBy(i => i.ImageId).First().ImageUrl);
             return Results.Ok(own.Select(r => new MyReviewResponse(r.ReviewId, r.ProductId,
-                names.GetValueOrDefault(r.ProductId), r.Rating, r.Comment, r.Status, r.CreatedAt)).ToArray());
+                names.GetValueOrDefault(r.ProductId), r.Rating, r.Comment, r.Status, r.CreatedAt, ownImages.GetValueOrDefault(r.ProductId))).ToArray());
         });
         mine.MapDelete("/{reviewId:long}", async (HttpContext context, long reviewId) =>
         {

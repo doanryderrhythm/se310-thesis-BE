@@ -35,6 +35,7 @@ internal static class GoodsReceiptPrinter
 <html lang="vi">
 <head>
 <meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Phiếu nhập hàng {{E(r.ReceiptCode)}}</title>
 <style>
   @page { size: A4; margin: 14mm; }
@@ -47,7 +48,9 @@ internal static class GoodsReceiptPrinter
   h2 { text-align: center; font-size: 18px; letter-spacing: .04em; margin: 18px 0 2px; }
   .code { text-align: center; margin-bottom: 14px; }
   .banner { text-align: center; font-weight: 700; color: #b00020; border: 2px solid #b00020; padding: 4px; margin: 8px 0; }
+  .table-wrap { max-width: 100%; overflow-x: auto; }
   table { width: 100%; border-collapse: collapse; margin-top: 12px; }
+  td { overflow-wrap: anywhere; }
   th, td { border: 1px solid #444; padding: 5px 7px; vertical-align: top; }
   th { background: #f0f0f0; text-align: center; }
   td.num, th.num { text-align: right; white-space: nowrap; }
@@ -60,7 +63,8 @@ internal static class GoodsReceiptPrinter
   .sign small { color: #555; }
   .actions { text-align: center; margin-bottom: 14px; }
   button { padding: 8px 18px; font-size: 14px; cursor: pointer; }
-  @media print { .actions { display: none; } body { padding: 0; } }
+  @media (max-width: 600px) { header { flex-direction: column; gap: 6px; } header .meta { text-align: left; } table { min-width: 650px; } .sign { gap: 10px; font-size: 11px; } }
+  @media print { .actions { display: none; } body { padding: 0; } .table-wrap { overflow: visible; } table { table-layout: fixed; min-width: 0; font-size: 11px; } th:nth-child(1) { width: 5%; } th:nth-child(2) { width: 18%; } th:nth-child(3) { width: 25%; } th:nth-child(4) { width: 13%; } th:nth-child(5) { width: 6%; } th:nth-child(6) { width: 15%; } th:nth-child(7) { width: 18%; } }
 </style>
 </head>
 <body>
@@ -83,7 +87,7 @@ internal static class GoodsReceiptPrinter
   {{(string.IsNullOrEmpty(r.SupplierInvoiceNo) ? "" : $"<p>Số hóa đơn của nhà cung cấp: <b>{E(r.SupplierInvoiceNo)}</b></p>")}}
   {{(string.IsNullOrEmpty(r.Note) ? "" : $"<p>Ghi chú: {E(r.Note)}</p>")}}
 </div>
-<table>
+<div class="table-wrap"><table>
 <thead><tr><th>STT</th><th>Mã SKU</th><th>Sản phẩm</th><th>Size / Màu</th><th class="num">SL</th><th class="num">Đơn giá (đ)</th><th class="num">Thành tiền (đ)</th></tr></thead>
 <tbody>
 """);
@@ -98,7 +102,7 @@ internal static class GoodsReceiptPrinter
         html.Append($$"""
 <tr class="total"><td colspan="4" style="text-align:right">Tổng cộng</td><td class="num">{{r.TotalQuantity}}</td><td></td><td class="num">{{Money(r.TotalAmount)}}</td></tr>
 </tbody>
-</table>
+</table></div>
 <p class="words">Tổng tiền bằng chữ: {{E(VietnameseNumber.Money((long)Math.Round(r.TotalAmount)))}}</p>
 <div class="sign">
   <div><b>Người lập phiếu</b><br><small>(Ký, ghi rõ họ tên)</small><br><br><br>{{E(r.CreatedBy)}}</div>

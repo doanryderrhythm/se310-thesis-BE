@@ -1,128 +1,386 @@
 [
   {
     "productId": "P01",
-    "price": 199000,
-    "sizes": ["S", "M", "L"],
+    "price": 437600,
+    "sizes": [
+      "S",
+      "M",
+      "L",
+      "XL"
+    ],
     "colors": [
-      { "name": "Đen", "hex": "#22252b" },
-      { "name": "Trắng", "hex": "#f2f1eb" }
+      {
+        "name": "Đen",
+        "hex": "#222222"
+      }
     ]
   },
   {
     "productId": "P02",
-    "price": 259000,
-    "sizes": ["S", "M", "L"],
+    "price": 437600,
+    "sizes": [
+      "S",
+      "M",
+      "L",
+      "XL"
+    ],
     "colors": [
-      { "name": "Xanh dương", "hex": "#3269a5" },
-      { "name": "Đỏ", "hex": "#b63234" }
+      {
+        "name": "Be",
+        "hex": "#d9c6a5"
+      }
     ]
   },
   {
     "productId": "P03",
-    "price": 289000,
-    "sizes": ["S", "M", "L"],
+    "price": 437600,
+    "sizes": [
+      "S",
+      "M",
+      "L",
+      "XL"
+    ],
     "colors": [
-      { "name": "Xanh nhạt", "hex": "#ccd8e5" },
-      { "name": "Xanh lá", "hex": "#216c67" }
+      {
+        "name": "Xám Nhạt",
+        "hex": "#c4c4c4"
+      }
     ]
   },
   {
     "productId": "P04",
-    "price": 329000,
-    "sizes": ["S", "M", "L", "XL"],
-    "colors": [{ "name": "Sọc navy", "hex": "#23324a" }]
+    "price": 421600,
+    "sizes": [
+      "S",
+      "M",
+      "L",
+      "XL"
+    ],
+    "colors": [
+      {
+        "name": "Be",
+        "hex": "#d9c6a5"
+      }
+    ]
   },
   {
     "productId": "P05",
-    "price": 449000,
-    "sizes": ["S", "M", "L"],
+    "price": 421600,
+    "sizes": [
+      "S",
+      "M",
+      "L",
+      "XL"
+    ],
     "colors": [
-      { "name": "Caro đỏ", "hex": "#8a3436" },
-      { "name": "Caro đen", "hex": "#34373a" }
+      {
+        "name": "Đen",
+        "hex": "#222222"
+      }
     ]
   },
   {
     "productId": "P06",
-    "price": 499000,
-    "sizes": ["S", "M", "L"],
-    "colors": [{ "name": "Caro đỏ", "hex": "#692c35" }]
+    "price": 437600,
+    "sizes": [
+      "S",
+      "M",
+      "L",
+      "XL"
+    ],
+    "colors": [
+      {
+        "name": "Be",
+        "hex": "#d9c6a5"
+      }
+    ]
   },
   {
     "productId": "P07",
-    "price": 529000,
-    "sizes": ["S", "M", "L"],
-    "colors": [{ "name": "Đỏ", "hex": "#b73731" }]
+    "price": 119000,
+    "sizes": [
+      "S",
+      "M",
+      "L",
+      "XL"
+    ],
+    "colors": [
+      {
+        "name": "Đỏ Đậm",
+        "hex": "#8b2232"
+      }
+    ]
   },
   {
     "productId": "P08",
-    "price": 559000,
-    "sizes": ["S", "M", "L", "XL"],
-    "colors": [{ "name": "Vàng họa tiết", "hex": "#e6c432" }]
+    "price": 147750,
+    "sizes": [
+      "S",
+      "M",
+      "L",
+      "XL"
+    ],
+    "colors": [
+      {
+        "name": "Đen",
+        "hex": "#222222"
+      }
+    ]
   },
   {
     "productId": "P09",
-    "price": 599000,
-    "sizes": ["S", "M", "L"],
-    "colors": [{ "name": "Đen", "hex": "#22252b" }]
+    "price": 147750,
+    "sizes": [
+      "S",
+      "M",
+      "L",
+      "XL"
+    ],
+    "colors": [
+      {
+        "name": "Nâu Nhạt",
+        "hex": "#b68b69"
+      }
+    ]
   },
   {
     "productId": "P10",
-    "price": 549000,
-    "sizes": ["S", "M", "L"],
-    "colors": [{ "name": "Đen", "hex": "#22252b" }]
+    "price": 159000,
+    "sizes": [
+      "S",
+      "M",
+      "L",
+      "XL"
+    ],
+    "colors": [
+      {
+        "name": "Xanh Dương Nhạt",
+        "hex": "#a7c7e7"
+      }
+    ]
   },
   {
     "productId": "P11",
-    "price": 349000,
-    "sizes": ["S", "M", "L"],
-    "colors": [{ "name": "Xanh denim", "hex": "#486b8c" }]
+    "price": 159000,
+    "sizes": [
+      "S",
+      "M",
+      "L",
+      "XL"
+    ],
+    "colors": [
+      {
+        "name": "Xám Nhạt",
+        "hex": "#c4c4c4"
+      }
+    ]
   },
   {
     "productId": "P12",
-    "price": 649000,
-    "sizes": ["S", "M", "L", "XL"],
+    "price": 239000,
+    "sizes": [
+      "S",
+      "M",
+      "L",
+      "XL"
+    ],
     "colors": [
-      { "name": "Đen", "hex": "#22252b" },
-      { "name": "Xanh denim", "hex": "#486b8c" }
+      {
+        "name": "Trắng",
+        "hex": "#f5f5f5"
+      }
     ]
   },
   {
     "productId": "P13",
-    "price": 699000,
-    "sizes": ["S", "M", "L"],
-    "colors": [{ "name": "Be", "hex": "#ccb99e" }]
+    "price": 397600,
+    "sizes": [
+      "S",
+      "M",
+      "L",
+      "XL"
+    ],
+    "colors": [
+      {
+        "name": "Be",
+        "hex": "#d9c6a5"
+      }
+    ]
   },
   {
     "productId": "P14",
-    "price": 799000,
-    "sizes": ["S", "M", "L"],
+    "price": 472150,
+    "sizes": [
+      "S",
+      "M",
+      "L",
+      "XL"
+    ],
     "colors": [
-      { "name": "Đen", "hex": "#22252b" },
-      { "name": "Xanh navy", "hex": "#243b60" }
+      {
+        "name": "Xám",
+        "hex": "#888888"
+      }
     ]
   },
   {
     "productId": "P15",
-    "price": 899000,
-    "sizes": ["S", "M", "L"],
+    "price": 472150,
+    "sizes": [
+      "S",
+      "M",
+      "L",
+      "XL"
+    ],
     "colors": [
-      { "name": "Đen", "hex": "#22252b" },
-      { "name": "Trắng", "hex": "#f2f1eb" }
+      {
+        "name": "Be",
+        "hex": "#d9c6a5"
+      }
     ]
   },
   {
     "productId": "P16",
-    "price": 749000,
-    "sizes": ["S", "M", "L", "XL"],
+    "price": 472150,
+    "sizes": [
+      "S",
+      "M",
+      "L",
+      "XL"
+    ],
     "colors": [
-      { "name": "Xám than", "hex": "#484e56" },
-      { "name": "Xanh navy", "hex": "#243b60" }
+      {
+        "name": "Đen",
+        "hex": "#222222"
+      }
     ]
   },
   {
     "productId": "P17",
-    "price": 299000,
-    "sizes": ["S", "M", "L"],
-    "colors": [{ "name": "Trắng", "hex": "#f2f1eb" }]
+    "price": 422450,
+    "sizes": [
+      "S",
+      "M",
+      "L",
+      "XL"
+    ],
+    "colors": [
+      {
+        "name": "Nâu",
+        "hex": "#795548"
+      }
+    ]
+  },
+  {
+    "productId": "P18",
+    "price": 472150,
+    "sizes": [
+      "S",
+      "M",
+      "L",
+      "XL"
+    ],
+    "colors": [
+      {
+        "name": "Đen",
+        "hex": "#222222"
+      }
+    ]
+  },
+  {
+    "productId": "P19",
+    "price": 229000,
+    "sizes": [
+      "S",
+      "M",
+      "L",
+      "XL"
+    ],
+    "colors": [
+      {
+        "name": "Đen",
+        "hex": "#222222"
+      }
+    ]
+  },
+  {
+    "productId": "P20",
+    "price": 662150,
+    "sizes": [
+      "S",
+      "M",
+      "L",
+      "XL"
+    ],
+    "colors": [
+      {
+        "name": "Đen",
+        "hex": "#222222"
+      }
+    ]
+  },
+  {
+    "productId": "P21",
+    "price": 111000,
+    "sizes": [
+      "S",
+      "M",
+      "L",
+      "XL"
+    ],
+    "colors": [
+      {
+        "name": "Xám Đậm",
+        "hex": "#555555"
+      }
+    ]
+  },
+  {
+    "productId": "P22",
+    "price": 212550,
+    "sizes": [
+      "S",
+      "M",
+      "L",
+      "XL"
+    ],
+    "colors": [
+      {
+        "name": "Đỏ Đậm",
+        "hex": "#8b2232"
+      }
+    ]
+  },
+  {
+    "productId": "P23",
+    "price": 207900,
+    "sizes": [
+      "S",
+      "M",
+      "L",
+      "XL"
+    ],
+    "colors": [
+      {
+        "name": "Đen",
+        "hex": "#222222"
+      }
+    ]
+  },
+  {
+    "productId": "P24",
+    "price": 229000,
+    "sizes": [
+      "S",
+      "M",
+      "L",
+      "XL"
+    ],
+    "colors": [
+      {
+        "name": "Xám",
+        "hex": "#888888"
+      }
+    ]
   }
 ]
